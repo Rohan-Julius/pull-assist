@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+langchain>=0.2,<0.4
+langchain_openai
+langgraph
+openai
+python-dotenv
+requests
+pydantic
+rich
+pytest
+langgraph
