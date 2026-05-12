@@ -87,5 +87,17 @@ ehthumbs.db
 stress_test_results.json
 demo_output/
 
+# Server data (secrets + logs)
+server/api_keys.json
+server/usage.log
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# CLI user config (lives in ~/.pull-assist/)
+# .pull-assist/
+
 # Git
 .gitkeep

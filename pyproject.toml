@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pull-assist"
+version = "0.1.0"
+description = "AI-powered PR impact analysis — risk scoring, blast radius, test gaps, deployment strategy"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Rohan Julius"},
+]
+keywords = ["pr", "pull-request", "impact-analysis", "code-review", "risk"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Quality Assurance",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "langchain>=0.2,<0.4",
+    "langchain_openai",
+    "langgraph",
+    "openai",
+    "python-dotenv",
+    "requests",
+    "pydantic",
+    "rich>=13.0",
+    "click>=8.0",
+    "pytest",
+]
+
+[project.scripts]
+pa = "cli.app:main"
+pullassist = "cli.app:main"
+
+[project.urls]
+Homepage = "https://github.com/Rohan-Julius/pull-assist"
+Repository = "https://github.com/Rohan-Julius/pull-assist"
+
+[tool.setuptools.packages.find]
+include = [
+    "cli*",
+    "agents*",
+    "config*",
+    "github*",
+    "graph*",
+    "memory*",
+    "output*",
+    "tools*",
+]
