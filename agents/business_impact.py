@@ -1,5 +1,5 @@
 """
-Business Impact Analyzer — Enhancement 3
+Business Impact Analyzer
 
 This is NOT a full LangGraph agent (no tool calls, no state node).
 It runs as a post-processing step after all agents complete.

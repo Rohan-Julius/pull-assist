@@ -1,12 +1,6 @@
 """
-Formatter — Enhanced
+Formatter 
 
-New sections in all output formats:
-  - Business Impact panel (prominent, at the top after risk score)
-  - Evidence-backed runtime risks (shows evidence array per scenario)
-  - Rollback Advisor section (specific steps, not just difficulty)
-  - Historical context section
-  - Score working (shows LLM's weighted calculation)
 """
 
 import json
@@ -158,6 +152,31 @@ def print_report(report):
             for step in steps[:4]:
                 console.print(f"    [dim]{step}[/dim]")
 
+    # ── Propagation chains ────────────────────────────────────────────────────
+    chains = getattr(report, 'propagation_chains', []) or []
+    if chains:
+        console.print("\n[bold]Failure Propagation Chains[/bold]")
+        for c in chains[:3]:
+            risk_c = RISK_COLORS.get(c.get('chain_risk_level', 'LOW'), 'white')
+            console.print(f"  [{risk_c}]●[/{risk_c}] [bold]{c.get('symbol','')}[/bold]: {c.get('arrow_diagram','')}")
+            if c.get('narrative'):
+                console.print(f"    [dim]{c['narrative']}[/dim]")
+
+    # ── Deployment advice ─────────────────────────────────────────────────────
+    deploy = getattr(report, 'deployment_advice', {}) or {}
+    if deploy and deploy.get('strategy'):
+        strategy = deploy['strategy']
+        emoji = deploy.get('emoji', '')
+        console.print(Panel(
+            f"[bold]{emoji} {strategy.replace('_',' ').title()}[/bold]\n"
+            f"{deploy.get('description', '')}\n\n"
+            + (f"[bold]Reasons:[/bold]\n" + "\n".join(f"  • {r}" for r in deploy.get('reasons', [])[:4]) + "\n\n" if deploy.get('reasons') else "")
+            + (f"[bold]Conditions:[/bold]\n" + "\n".join(f"  • {c}" for c in deploy.get('conditions', [])[:4]) + "\n\n" if deploy.get('conditions') else "")
+            + (f"[bold]Monitoring:[/bold]\n" + "\n".join(f"  📊 {m}" for m in deploy.get('monitoring_hints', [])[:3]) if deploy.get('monitoring_hints') else ""),
+            title="[bold magenta]Deployment Strategy[/bold magenta]",
+            border_style="magenta",
+        ))
+
     # ── Conflict log ──────────────────────────────────────────────────────────
     verdict = report.objections.get("verdict", "AGREE")
     if verdict != "AGREE" or report.rerun_count > 0:
@@ -304,6 +323,51 @@ def save_markdown(report, output_dir: str = "reports") -> str:
                 lines.append(f"- {step}")
             lines.append("")
 
+    # Propagation chains
+    chains = getattr(report, 'propagation_chains', []) or []
+    if chains:
+        lines += ["## Failure Propagation Chains", ""]
+        for c in chains[:3]:
+            lines += [
+                f"**`{c.get('symbol','')}`** — {c.get('chain_risk_level','LOW')} risk",
+                f"> {c.get('arrow_diagram','')}",
+                "",
+            ]
+            if c.get('narrative'):
+                lines.append(f"_{c['narrative']}_")
+                lines.append("")
+            if c.get('file_chain'):
+                lines.append(f"Files: `{c['file_chain']}`")
+                lines.append("")
+
+    # Deployment strategy
+    deploy = getattr(report, 'deployment_advice', {}) or {}
+    if deploy and deploy.get('strategy'):
+        emoji = deploy.get('emoji', '')
+        strategy = deploy['strategy']
+        lines += [
+            f"## Deployment Strategy: {emoji} {strategy.replace('_',' ').title()}", "",
+            f"_{deploy.get('description', '')}_", "",
+        ]
+        if deploy.get('reasons'):
+            lines += ["**Reasons:**"]
+            for r in deploy['reasons'][:4]:
+                lines.append(f"- {r}")
+            lines.append("")
+        if deploy.get('conditions'):
+            lines += ["**Pre-deploy conditions:**"]
+            for c in deploy['conditions'][:4]:
+                lines.append(f"- {c}")
+            lines.append("")
+        if deploy.get('monitoring_hints'):
+            lines += ["**Monitoring:**"]
+            for m in deploy['monitoring_hints'][:3]:
+                lines.append(f"- 📊 {m}")
+            lines.append("")
+        if deploy.get('estimated_blast_radius'):
+            lines.append(f"_Blast radius: {deploy['estimated_blast_radius']}_")
+            lines.append("")
+
     # Critic
     verdict = report.objections.get("verdict", "AGREE")
     from agents.orchestrator_patch import compute_adjudication_summary
@@ -365,6 +429,9 @@ def save_json(report, output_dir: str = "reports") -> str:
             "missed_impacts": report.objections.get("missed_impacts", []),
             "rerun_count": report.rerun_count,
         },
+        "evidence_graph": getattr(report, 'evidence_graph', {}),
+        "propagation_chains": getattr(report, 'propagation_chains', []),
+        "deployment_advice": getattr(report, 'deployment_advice', {}),
     }
 
     fp.write_text(json.dumps(payload, indent=2, default=str))

@@ -1,5 +1,5 @@
 """
-Rollback Advisor Agent — Enhancement 4
+Rollback Advisor Agent
 
 Purpose: Estimate the difficulty and risks of rolling back this deployment
          if it causes an incident. This is different from risk_level:

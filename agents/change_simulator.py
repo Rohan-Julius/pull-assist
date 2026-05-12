@@ -1,17 +1,9 @@
 """
-Change Simulator Agent — Enhanced
+Change Simulator Agent
+This agent simulates the runtime impact of code changes, predicting what will break in production.
+It uses evidence from the codebase to identify specific breaking scenarios, their failure modes, and severity.
+Strict rules prevent hallucination of breakage without evidence. A pure-addition guard ensures accurate assessment.
 
-Enhancement 1: Evidence-backed runtime risks
-  Every breaking_scenario now requires an 'evidence' array — specific lines
-  or file references proving the caller actually uses the changed symbol.
-  Forces the LLM to cite fetched file content, not hallucinate callers.
-
-Enhancement (own): Confidence self-reporting
-  Agent outputs a 'confidence' score (1–5). Low confidence automatically
-  primes the Critic to scrutinise this output more closely.
-
-Enhancement (own): Severity-weighted blast radius integration
-  Caller files on HIGH_SEVERITY_PATH_PATTERNS automatically flag as critical.
 """
 
 from agents.base import run_with_tools, AgentOutput

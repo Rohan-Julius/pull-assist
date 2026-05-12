@@ -1,21 +1,20 @@
 """
-Risk Evaluator Agent — Enhanced
+Risk Evaluator Agent 
+  Weighted scoring with explicit formula:
+  overall_risk_score = (
+    blast_radius_score   × 0.30  +
+    test_coverage_score  × 0.30  +        
+    runtime_risk_score   × 0.25  +
+    complexity_score     × 0.15
+  )
+  
+  Risk level thresholds (after computing score):
+    0.0–3.0  → LOW
+    3.1–5.9  → MEDIUM
+    6.0–7.9  → HIGH
+    8.0–10.0 → CRITICAL   
 
-Enhancement 2: Explicit weighted risk scoring
-  The LLM is now shown the exact weight formula and must compute
-  the weighted average itself, then show working. This prevents
-  the LLM from ignoring weights and scoring intuitively.
 
-  After the LLM responds, we server-side validate the maths:
-  if LLM's overall_risk_score deviates >0.5 from the formula result,
-  we override it with the correct value. Agents can't lie about scores.
-
-Enhancement 3: Business impact integration
-  Risk evaluator now receives business_impacts (from the post-processor)
-  and adjusts scores for known high-impact domains.
-
-Enhancement (own): Confidence-weighted scoring
-  If a prior agent flagged low confidence, its dimension is downweighted.
 """
 
 import json

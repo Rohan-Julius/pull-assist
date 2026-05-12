@@ -1,12 +1,6 @@
 """
-Report Builder — Enhanced
+Report Builder 
 
-New fields in ReportData:
-  - rollback_advice:    from Rollback Advisor agent
-  - business_impacts:   from Business Impact analyzer
-  - impact_summary:     one-sentence business impact summary
-  - severity_domains:   high-severity business domains
-  - historical_context: structured historical risk context
 """
 
 from dataclasses import dataclass, field
@@ -46,6 +40,11 @@ class ReportData:
     impact_summary: str
     severity_domains: list
     historical_context: dict
+
+    # Graph layer outputs
+    evidence_graph: dict
+    propagation_chains: list
+    deployment_advice: dict
 
     # Conflict metadata
     rerun_count: int
@@ -89,6 +88,11 @@ def build_report(final_state: dict) -> ReportData:
         impact_summary=final_state.get("impact_summary", ""),
         severity_domains=final_state.get("severity_domains", []),
         historical_context=final_state.get("historical_context", {}),
+
+        # Graph layer
+        evidence_graph=final_state.get("evidence_graph", {}),
+        propagation_chains=final_state.get("propagation_chains", []),
+        deployment_advice=final_state.get("deployment_advice", {}),
 
         rerun_count=final_state.get("rerun_count", 0),
         conflict_log=final_state.get("conflict_log", []),

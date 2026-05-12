@@ -41,6 +41,9 @@ import agents.risk_evaluator as risk_eval
 import agents.critic as critic_agent
 import agents.rollback_advisor as rollback_adv
 import agents.business_impact as biz_impact
+from graph.evidence_graph import build_evidence_graph
+from graph.propagation_engine import build_propagation_chains
+from graph.deployment_advisor import build_deployment_advice
 
 console = Console()
 
@@ -77,6 +80,11 @@ class PRAnalysisState(TypedDict):
     risk_assessment: dict
     objections: dict
     rollback_advice: dict
+
+    # Graph layer outputs (Priority 1-3)
+    evidence_graph: dict
+    propagation_chains: list
+    deployment_advice: dict
 
     # Enhancement outputs (written post-graph)
     business_impacts: list
@@ -299,6 +307,49 @@ def should_rerun(state: PRAnalysisState) -> str:
         return "done"
 
 
+# ── Graph Layer Node ───────────────────────────────────────────────────────────
+
+def node_graph_layer(state: PRAnalysisState) -> dict:
+    """
+    Runs the three graph engines in sequence after all agents complete.
+    Entirely deterministic — no LLM calls.
+    Builds: EvidenceGraph → PropagationChains → DeploymentAdvice
+    """
+    console.print("\n[bold cyan]▶ Graph Layer:[/bold cyan] Evidence graph + propagation + deployment advice...")
+
+    blast_radius    = state.get("blast_radius", {})
+    per_file_ctx    = state.get("per_file_context", [])
+    runtime_risks   = state.get("runtime_risks", {})
+
+    # Priority 1: Evidence Graph
+    graph = build_evidence_graph(state, blast_radius, per_file_ctx)
+    console.print(
+        f"  [green]✓[/green] Evidence graph: {graph.total_symbols_changed} symbols, "
+        f"{graph.total_files_affected} affected files, "
+        f"depth {graph.max_propagation_depth}"
+    )
+
+    # Priority 2: Failure Propagation Chains
+    chains = build_propagation_chains(graph, runtime_risks, state=state)
+    if chains:
+        console.print(f"  [green]✓[/green] Propagation chains: {len(chains)} chain(s)")
+        for chain in chains[:2]:
+            console.print(f"    [dim]{chain.arrow_diagram}[/dim]")
+
+    # Priority 3: Deployment Advisor
+    advice = build_deployment_advice(state, graph, chains)
+    console.print(
+        f"  [green]✓[/green] Deployment strategy: "
+        f"[bold]{advice.strategy}[/bold] (confidence: {advice.confidence})"
+    )
+
+    return {
+        "evidence_graph":    graph.to_dict(),
+        "propagation_chains": [c.to_dict() for c in chains],
+        "deployment_advice": advice.to_dict(),
+    }
+
+
 # ── Graph builder ──────────────────────────────────────────────────────────────
 
 def build_graph():
@@ -313,6 +364,7 @@ def build_graph():
     graph.add_node("risk_evaluator_with_business", node_risk_evaluator_with_business)
     graph.add_node("critic",                       node_critic)
     graph.add_node("rerun_with_objections",        node_rerun_with_objections)
+    graph.add_node("graph_layer",                  node_graph_layer)
 
     # Linear edges
     graph.add_edge(START,                          "dependency_mapper")
@@ -328,12 +380,13 @@ def build_graph():
         should_rerun,
         {
             "rerun": "rerun_with_objections",
-            "done":  END,
+            "done":  "graph_layer",
         }
     )
 
     # After re-run: re-run critic to check if issues are resolved
     graph.add_edge("rerun_with_objections", "critic")
+    graph.add_edge("graph_layer",           END)
 
     return graph.compile()
 
@@ -387,6 +440,11 @@ def run_analysis(context: dict) -> dict:
         "risk_assessment": {},
         "objections":      {},
         "rollback_advice": {},
+
+        # Graph layer outputs
+        "evidence_graph":    {},
+        "propagation_chains": [],
+        "deployment_advice": {},
 
         # Enhancement outputs
         "business_impacts":  [],
