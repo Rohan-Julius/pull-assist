@@ -1,52 +1,17 @@
-# pull-assist Backend Stack
-# Deploy: docker compose up -d
+# pull-assist Proxy-Only Stack
+# Use this when vLLM is ALREADY running (your current setup).
+#
+# Deploy: docker compose -f docker-compose.proxy-only.yml up -d
 #
 # Architecture:
-#   Nginx (:443/:80) → FastAPI Proxy (:9000) → vLLM (:8000)
+#   Existing vLLM (:8000) ← FastAPI Proxy (:9000) ← Your Mac (pa review)
 #
-# For AMD GPUs, ensure ROCm drivers are installed on the host.
-# See: https://rocm.docs.amd.com/projects/install-on-linux/en/latest/
+# The proxy connects to vLLM on the HOST network via host.docker.internal
+# or the host IP. No port conflicts since we don't touch port 8000.
 
 version: "3.9"
 
 services:
-  # ── vLLM — Model inference server ─────────────────────────────────────────
-  vllm:
-    image: vllm/vllm-openai:latest
-    container_name: pull-assist-vllm
-    restart: unless-stopped
-    # For AMD GPU (ROCm), use:
-    #   image: rocm/vllm:latest
-    #   devices:
-    #     - /dev/kfd
-    #     - /dev/dri
-    # For NVIDIA GPU, use:
-    #   deploy:
-    #     resources:
-    #       reservations:
-    #         devices:
-    #           - driver: nvidia
-    #             count: 1
-    #             capabilities: [gpu]
-    ports:
-      - "8000:8000"
-    volumes:
-      - vllm-cache:/root/.cache/huggingface
-    environment:
-      - HF_HOME=/root/.cache/huggingface
-    command: >
-      --model deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct
-      --host 0.0.0.0
-      --port 8000
-      --max-model-len 4096
-      --trust-remote-code
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/models"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 120s
-
   # ── FastAPI Proxy — Auth + rate limiting layer ────────────────────────────
   proxy:
     build:
@@ -54,10 +19,11 @@ services:
       dockerfile: Dockerfile.proxy
     container_name: pull-assist-proxy
     restart: unless-stopped
-    ports:
-      - "9000:9000"
+    # Use host network so the proxy can reach vLLM on localhost:8000
+    network_mode: host
     environment:
-      - VLLM_BACKEND_URL=http://vllm:8000
+      # Points to your already-running vLLM on port 8000
+      - VLLM_BACKEND_URL=http://localhost:8000
       - PROXY_PORT=9000
       - RATE_LIMIT_PER_MINUTE=30
       - MAX_CONCURRENT_PER_KEY=2
@@ -66,30 +32,6 @@ services:
       - USAGE_LOG_FILE=/data/usage.log
     volumes:
       - proxy-data:/data
-    depends_on:
-      vllm:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-
-  # ── Nginx — TLS termination + reverse proxy ──────────────────────────────
-  nginx:
-    image: nginx:alpine
-    container_name: pull-assist-nginx
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      # Uncomment for TLS:
-      # - ./nginx/certs:/etc/nginx/certs:ro
-    depends_on:
-      - proxy
 
 volumes:
-  vllm-cache:
   proxy-data:
