@@ -1,6 +1,18 @@
 # pull-assist Proxy-Only Stack
 # Use this when vLLM is ALREADY running (your current setup).
 #
+# ── Pipeline (why main.py can "work" but pa review fails) ───────────────────
+#   main.py + .env     → often LLM_BASE_URL = http://GPU:8000/v1  (vLLM direct;
+#                        LangChain speaks HTTP to vLLM and handles streaming.)
+#   pa review + gist   → LLM_BASE_URL = http://GPU:9000/v1  (this proxy; must
+#                        return one JSON body, not SSE, unless proxy ≥0.2.0.)
+#
+# After git pull on the GPU host, rebuild the proxy image so server/proxy.py
+# updates are inside the container:
+#   docker compose build --no-cache proxy && docker compose up -d
+# Verify new code:  curl -s http://localhost:9000/version | grep proxy_version
+# (expect proxy_version 0.2.0 or newer with SSE coalescing.)
+#
 # Start vLLM first (pick ONE style):
 #
 # A) Default — plain vLLM (no tool-choice flags). The app uses legacy tools by default.

@@ -19,6 +19,8 @@ def get_llm():
         temperature=LLM_TEMPERATURE,
         max_tokens=LLM_MAX_TOKENS,
         request_timeout=90,          # prevent infinite hangs
+        streaming=False,
+        model_kwargs={"stream": False},
     )
 # ── GitHub ────────────────────────────────────────────────────────────────────
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")

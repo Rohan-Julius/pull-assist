@@ -23,7 +23,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from collections import defaultdict
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
@@ -35,7 +35,7 @@ import requests as http_requests
 
 VLLM_BACKEND_URL = os.getenv("VLLM_BACKEND_URL", "http://localhost:8000")
 PROXY_PORT = int(os.getenv("PROXY_PORT", "9000"))
-PROXY_VERSION = "0.1.0"
+PROXY_VERSION = "0.2.0"
 
 # API key storage — in production, use a database
 API_KEYS_FILE = Path(os.getenv("API_KEYS_FILE", "server/api_keys.json"))
@@ -123,6 +123,116 @@ def _log_usage(key: str, user: str, endpoint: str, status: int, duration: float)
     }
     with open(USAGE_LOG_FILE, "a") as f:
         f.write(json.dumps(record) + "\n")
+
+
+def _coalesce_openai_chat_sse(sse_text: str) -> Optional[dict[str, Any]]:
+    """
+    Turn an OpenAI-style SSE chat completion body into a single non-streaming
+    chat.completion JSON object. Used when vLLM streams despite stream=false
+    or when an older proxy forwarded stream=true.
+    """
+    if not sse_text or "data:" not in sse_text:
+        return None
+
+    content_parts: list[str] = []
+    # index -> {id, name, arg_parts}
+    tool_acc: dict[int, dict[str, Any]] = {}
+    finish_reason: Optional[str] = None
+    model: Optional[str] = None
+    cid: Optional[str] = None
+
+    def _append_delta_text(delta: dict[str, Any]) -> None:
+        """Accumulate text from delta (content, reasoning, multimodal lists)."""
+        c = delta.get("content")
+        if isinstance(c, str) and c:
+            content_parts.append(c)
+        elif isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    t = part.get("text")
+                    if isinstance(t, str) and t:
+                        content_parts.append(t)
+        rc = delta.get("reasoning_content")
+        if isinstance(rc, str) and rc:
+            content_parts.append(rc)
+
+    for raw_line in sse_text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        if not payload.startswith("{"):
+            continue
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+
+        cid = chunk.get("id") or cid
+        model = chunk.get("model") or model
+        for ch in chunk.get("choices") or []:
+            if not isinstance(ch, dict):
+                continue
+            delta = ch.get("delta")
+            if not isinstance(delta, dict):
+                delta = {}
+            if ch.get("finish_reason"):
+                finish_reason = ch["finish_reason"]
+            _append_delta_text(delta)
+            for tc in delta.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                idx = int(tc.get("index", 0))
+                slot = tool_acc.setdefault(
+                    idx, {"id": "", "name": "", "arg_parts": []}
+                )
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if isinstance(fn, dict):
+                    if fn.get("name"):
+                        slot["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["arg_parts"].append(fn["arguments"])
+
+    tool_calls: list[dict[str, Any]] = []
+    for idx in sorted(tool_acc.keys()):
+        t = tool_acc[idx]
+        if t["id"] or t["name"] or t["arg_parts"]:
+            tool_calls.append(
+                {
+                    "id": t["id"] or f"call_{idx}",
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "arguments": "".join(t["arg_parts"]),
+                    },
+                }
+            )
+
+    text = "".join(content_parts)
+    if not text and not tool_calls:
+        return None
+
+    message: dict[str, Any] = {"role": "assistant", "content": text or None}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+
+    return {
+        "id": cid or "chatcmpl-coalesced",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model or "",
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop"),
+            }
+        ],
+    }
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -242,6 +352,13 @@ async def chat_completions(request: Request, auth: dict = Depends(verify_api_key
                 detail=f"Invalid JSON body: {e}",
             ) from e
 
+        # Buffered JSON only: force non-streaming toward vLLM. Some stacks still
+        # return SSE; we coalesce that below if resp.json() fails.
+        if isinstance(body, dict):
+            body = dict(body)
+            body["stream"] = False
+            body.pop("stream_options", None)
+
         resp = http_requests.post(
             f"{VLLM_BACKEND_URL}/v1/chat/completions",
             json=body,
@@ -252,13 +369,31 @@ async def chat_completions(request: Request, auth: dict = Depends(verify_api_key
         duration = time.time() - start
         _log_usage(key, user, "/v1/chat/completions", resp.status_code, duration)
 
-        # Safely parse response — vLLM may return non-JSON on errors
+        # Safely parse response — vLLM may return SSE even when stream=false
         try:
             resp_data = resp.json()
-        except (ValueError, Exception):
+        except Exception as parse_err:
+            logger.debug("vLLM response not JSON (%s); trying SSE coalesce", parse_err)
+            try:
+                coalesced = _coalesce_openai_chat_sse(resp.text or "")
+            except Exception as coal_err:
+                logger.warning("SSE coalesce failed: %s", coal_err)
+                coalesced = None
+            if coalesced is None and resp.text and "data:" in resp.text:
+                logger.warning(
+                    "SSE present but coalesce returned None; prefix=%r",
+                    (resp.text or "")[:500],
+                )
+            if coalesced is not None:
+                logger.info(
+                    "Coalesced SSE chat completion from vLLM (first line: %s)",
+                    (resp.text or "").splitlines()[0][:120] if resp.text else "",
+                )
+                return JSONResponse(content=coalesced, status_code=200)
+
             resp_data = {
                 "error": {
-                    "message": f"Backend returned non-JSON response (HTTP {resp.status_code}): {resp.text[:300]}",
+                    "message": f"Backend returned non-JSON response (HTTP {resp.status_code}): {(resp.text or '')[:300]}",
                     "type": "backend_error",
                     "code": resp.status_code,
                 }
@@ -299,6 +434,8 @@ async def completions(request: Request, auth: dict = Depends(verify_api_key)):
 
     try:
         body = await request.json()
+        if isinstance(body, dict):
+            body["stream"] = False
         resp = http_requests.post(
             f"{VLLM_BACKEND_URL}/v1/completions",
             json=body,
