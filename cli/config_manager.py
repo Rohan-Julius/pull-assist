@@ -143,7 +143,7 @@ def apply_config_to_env():
             settings.LLM_MAX_TOKENS = int(os.environ["LLM_MAX_TOKENS"])
         if os.getenv("USE_NATIVE_TOOL_CALLING") is not None:
             settings.USE_NATIVE_TOOL_CALLING = os.getenv(
-                "USE_NATIVE_TOOL_CALLING", "true"
+                "USE_NATIVE_TOOL_CALLING", "false"
             ).lower() in ("1", "true", "yes")
     except ImportError:
         pass  # settings not yet imported — env vars will be read on first import

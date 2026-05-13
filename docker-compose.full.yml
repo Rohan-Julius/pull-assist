@@ -34,8 +34,8 @@ services:
       - vllm-cache:/root/.cache/huggingface
     environment:
       - HF_HOME=/root/.cache/huggingface
-    # Omit --enable-auto-tool-choice if your vLLM image fails engine init; then set
-    # USE_NATIVE_TOOL_CALLING=false when running the pull-assist CLI.
+    # Plain vLLM command (no --enable-auto-tool-choice). The CLI defaults to legacy
+    # prompt-based tools; set USE_NATIVE_TOOL_CALLING=true only if you add hermes flags.
     command: >
       --model deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct
       --host 0.0.0.0

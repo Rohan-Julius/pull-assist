@@ -2,14 +2,15 @@
 Base utilities shared across all agents.
 
 Provides:
-  - run_with_tools()       — runs a tool-calling agent via native OpenAI tools API
+  - run_with_tools()       — tool agents (native or legacy; see USE_NATIVE_TOOL_CALLING)
   - run_without_tools()    — runs a simple LLM call with no tools
   - parse_json_output()    — safely parses LLM JSON response
   - AgentOutput            — typed wrapper for agent results
 
-When vLLM is launched with --enable-auto-tool-choice --tool-call-parser hermes,
-the server handles tool call parsing natively. LangChain's ChatOpenAI.bind_tools()
-sends tools as structured API parameters — no prompt engineering needed.
+By default, run_with_tools() uses legacy prompt-based tools so a plain vLLM server
+works without --enable-auto-tool-choice. Set USE_NATIVE_TOOL_CALLING=true only
+when vLLM is started with matching tool-choice flags; then LangChain bind_tools()
+sends tools as structured API parameters.
 """
 
 import json

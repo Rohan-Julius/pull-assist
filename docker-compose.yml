@@ -3,15 +3,14 @@
 #
 # Start vLLM first (pick ONE style):
 #
-# A) Reliable default — no server-side tool parser (use legacy tools in the app):
-#   export USE_NATIVE_TOOL_CALLING=false
+# A) Default — plain vLLM (no tool-choice flags). The app uses legacy tools by default.
 #   python -m vllm.entrypoints.openai.api_server \
 #     --model deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct \
 #     --host 0.0.0.0 --port 8000 \
 #     --dtype float16 --max-model-len 16384 \
 #     --gpu-memory-utilization 0.85 --trust-remote-code
 #
-# B) Native OpenAI tools (requires a vLLM build that starts cleanly with these flags):
+# B) Native OpenAI tools (requires vLLM with --enable-auto-tool-choice and parser):
 #   export USE_NATIVE_TOOL_CALLING=true
 #   python -m vllm.entrypoints.openai.api_server \
 #     --model deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct \

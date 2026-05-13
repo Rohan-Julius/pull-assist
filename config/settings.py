@@ -36,9 +36,11 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "not-needed")
 # the prompt, tool definitions, and agent scratchpad (often 2.5k–4k+ tokens).
 LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 LLM_TEMPERATURE = 0.1               # low temp for deterministic code analysis
-# When false, use prompt-based tools (no --enable-auto-tool-choice on vLLM).
+# When false (default), use prompt-based tools — works with plain vLLM.
+# Set to true only if vLLM is started with --enable-auto-tool-choice and a
+# matching --tool-call-parser (otherwise the API returns 400 on tool_choice).
 USE_NATIVE_TOOL_CALLING = os.getenv(
-    "USE_NATIVE_TOOL_CALLING", "true"
+    "USE_NATIVE_TOOL_CALLING", "false"
 ).lower() in ("1", "true", "yes")
 
 # ── Memory ────────────────────────────────────────────────────────────────────
