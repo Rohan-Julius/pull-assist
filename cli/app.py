@@ -67,7 +67,7 @@ def _launch_in_new_vscode_terminal(args: list[str]):
         subprocess.run([
             "osascript", "-e",
             f'tell application "System Events" to tell process "Code" '
-            f'to keystroke "clear && export PS1=\'pull-assist> \' && PA_LAUNCHED=1 {escaped_cmd}" & return'
+            f'to keystroke "export PS1=\'pull-assist> \' && PA_LAUNCHED=1 {escaped_cmd}" & return'
         ], capture_output=True, timeout=3)
 
         return True
@@ -120,11 +120,13 @@ def _register_commands():
     from cli.commands.history import history
     from cli.commands.config_cmd import config
     from cli.commands.status import status
+    from cli.commands.admin import admin
 
     cli.add_command(review)
     cli.add_command(history)
     cli.add_command(config)
     cli.add_command(status)
+    cli.add_command(admin)
 
 
 _register_commands()

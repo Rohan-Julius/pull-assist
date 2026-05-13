@@ -55,4 +55,8 @@ include = [
     "memory*",
     "output*",
     "tools*",
+    "server*",
 ]
+
+[tool.setuptools]
+py-modules = ["main"]

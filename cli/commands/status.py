@@ -123,16 +123,23 @@ def _check_github(cfg: dict, verbose: bool) -> bool:
 
 
 def _check_llm(cfg: dict, verbose: bool) -> bool:
-    """Check if the LLM endpoint is reachable."""
-    server = cfg.get("server", "")
+    """Check if the LLM endpoint is reachable (auto-discovers via registry)."""
+    from cli.registry import fetch_server_url
+
+    # Try registry first, fall back to local config
+    registry = fetch_server_url()
+    server = registry.get("server_url") or cfg.get("server", "")
+
+    if not registry.get("active", True) and not cfg.get("server"):
+        _status("GPU Server", False, registry.get("message", "GPU not active. Try again later."))
+        return False
 
     if not server:
-        _status("LLM Endpoint", False, "Not configured. Run: pa config set --server http://...")
+        _status("GPU Server", False, "No server configured. Ask your admin for the registry ID.")
         return False
 
     try:
         import requests
-        # vLLM exposes /v1/models — try that first
         models_url = server.rstrip("/")
         if not models_url.endswith("/models"):
             models_url += "/models"
@@ -149,34 +156,37 @@ def _check_llm(cfg: dict, verbose: bool) -> bool:
             data = resp.json()
             models = data.get("data", [])
             model_names = [m.get("id", "?") for m in models]
-            _status("LLM Endpoint", True,
-                    f"Reachable ({elapsed:.1f}s) — {len(models)} model(s) available")
+            source = "registry" if registry.get("server_url") else "local config"
+            _status("GPU Server", True,
+                    f"Connected ({elapsed:.1f}s) — {len(models)} model(s) [{source}]")
             if verbose and model_names:
                 for m in model_names[:5]:
                     console.print(f"    [dim]• {m}[/dim]")
 
-            # Check if configured model is available
             configured_model = cfg.get("model", "")
             if configured_model and configured_model not in model_names:
-                console.print(f"    [yellow]⚠ Configured model '{configured_model}' not found on server[/yellow]")
+                console.print(f"    [yellow]⚠ Configured model '{configured_model}' not found[/yellow]")
 
             return True
+        elif resp.status_code == 401:
+            _status("GPU Server", False, "Invalid API key. Ask admin for a new key.")
+            return False
         else:
-            _status("LLM Endpoint", False, f"Server returned {resp.status_code}")
+            _status("GPU Server", False, f"Server returned {resp.status_code}")
             if verbose:
                 console.print(f"    [dim]URL: {models_url}[/dim]")
             return False
 
     except requests.exceptions.Timeout:
-        _status("LLM Endpoint", False, f"Connection timeout (>10s) — {server}")
+        _status("GPU Server", False, f"Timeout (>10s) — {server}")
         return False
     except requests.exceptions.ConnectionError:
-        _status("LLM Endpoint", False, f"Cannot reach {server}")
+        _status("GPU Server", False, f"Cannot reach {server}")
         if verbose:
-            console.print("    [dim]Is your vLLM server running?[/dim]")
+            console.print("    [dim]GPU server may be offline.[/dim]")
         return False
     except Exception as e:
-        _status("LLM Endpoint", False, str(e))
+        _status("GPU Server", False, str(e))
         return False
 
 

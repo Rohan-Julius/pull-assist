@@ -20,10 +20,11 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 # Default values (used if config file doesn't exist yet)
 DEFAULTS = {
-    "server": "http://localhost:8000/v1",
-    "api_key": "not-needed",
+    "server": "",
+    "api_key": "",
     "github_token": "",
     "model": "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
+    "registry_gist_id": "",
 }
 
 
@@ -74,8 +75,9 @@ def save_config(config: dict):
     """Persist configuration to disk."""
     _ensure_config_dir()
 
-    # Only save user-settable keys
-    saveable = {k: config.get(k, "") for k in DEFAULTS.keys()}
+    # Save all known keys
+    all_keys = set(DEFAULTS.keys()) | set(config.keys())
+    saveable = {k: config.get(k, "") for k in all_keys}
     CONFIG_FILE.write_text(json.dumps(saveable, indent=2) + "\n")
 
 

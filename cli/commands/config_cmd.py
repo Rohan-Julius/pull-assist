@@ -85,32 +85,28 @@ def config_show():
 
 
 @config.command("set")
-@click.option("--server", type=str, help="LLM server endpoint URL.")
-@click.option("--key", type=str, help="API key for the proxy layer.")
+@click.option("--key", type=str, help="API key (get from admin).")
 @click.option("--token", "github_token", type=str, help="GitHub personal access token.")
-@click.option("--model", type=str, help="LLM model name.")
-def config_set(server, key, github_token, model):
+@click.option("--model", type=str, help="LLM model name.", hidden=True)
+@click.option("--server", type=str, help="Override server URL directly.", hidden=True)
+def config_set(key, github_token, model, server):
     """Set configuration values.
 
     \b
     EXAMPLES:
+      pa config set --key pa-abc123 --token ghp_abc123
       pa config set --token ghp_abc123
-      pa config set --server http://your-server:8000/v1 --key pa-abc123
-      pa config set --token ghp_... --server http://... --key pa-...
-      pa config set --model deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct
+      pa config set --key pa-abc123
     """
     from cli.config_manager import load_config, save_config
 
-    if not any([server, key, github_token, model]):
+    if not any([key, github_token, model, server]):
         console.print("[yellow]No values provided. Use --help to see options.[/yellow]")
         return
 
     cfg = load_config()
     changes = []
 
-    if server:
-        cfg["server"] = server
-        changes.append(("server", server))
     if key:
         cfg["api_key"] = key
         changes.append(("api_key", _mask(key)))
@@ -120,6 +116,9 @@ def config_set(server, key, github_token, model):
     if model:
         cfg["model"] = model
         changes.append(("model", model))
+    if server:
+        cfg["server"] = server
+        changes.append(("server", server))
 
     save_config(cfg)
 
