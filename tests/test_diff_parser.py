@@ -15,7 +15,7 @@ GITHUB_MAX_TOOL_CALLS_PER_AGENT = 3 # hard cap on API calls per agent per run
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8000/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-ai/DeepSeek-Coder-V2-Instruct")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "not-needed")
-LLM_MAX_TOKENS = 1024
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 LLM_TEMPERATURE = 0.1               # low temp for deterministic code analysis
 
 # ── Memory ────────────────────────────────────────────────────────────────────

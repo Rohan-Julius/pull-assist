@@ -1,10 +1,33 @@
 # pull-assist Proxy-Only Stack
 # Use this when vLLM is ALREADY running (your current setup).
 #
-# Deploy: docker compose -f docker-compose.proxy-only.yml up -d
+# Start vLLM first (pick ONE style):
+#
+# A) Reliable default — no server-side tool parser (use legacy tools in the app):
+#   export USE_NATIVE_TOOL_CALLING=false
+#   python -m vllm.entrypoints.openai.api_server \
+#     --model deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct \
+#     --host 0.0.0.0 --port 8000 \
+#     --dtype float16 --max-model-len 16384 \
+#     --gpu-memory-utilization 0.85 --trust-remote-code
+#
+# B) Native OpenAI tools (requires a vLLM build that starts cleanly with these flags):
+#   export USE_NATIVE_TOOL_CALLING=true
+#   python -m vllm.entrypoints.openai.api_server \
+#     --model deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct \
+#     --host 0.0.0.0 --port 8000 \
+#     --dtype float16 --max-model-len 16384 \
+#     --gpu-memory-utilization 0.85 \
+#     --enable-auto-tool-choice --tool-call-parser hermes \
+#     --trust-remote-code
+#
+# Use --max-model-len well above (prompt + LLM_MAX_TOKENS + scratchpad). 4096 is too small.
+#
+# Then deploy the proxy:
+#   docker compose up -d
 #
 # Architecture:
-#   Existing vLLM (:8000) ← FastAPI Proxy (:9000) ← Your Mac (pa review)
+#   vLLM (:8000) ← FastAPI Proxy (:9000) ← Your Mac (pa review)
 #
 # The proxy connects to vLLM on the HOST network via host.docker.internal
 # or the host IP. No port conflicts since we don't touch port 8000.

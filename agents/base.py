@@ -2,27 +2,26 @@
 Base utilities shared across all agents.
 
 Provides:
-  - run_with_tools()       — runs a structured-chat agent with tool access
+  - run_with_tools()       — runs a tool-calling agent via native OpenAI tools API
   - run_without_tools()    — runs a simple LLM call with no tools
   - parse_json_output()    — safely parses LLM JSON response
   - AgentOutput            — typed wrapper for agent results
+
+When vLLM is launched with --enable-auto-tool-choice --tool-call-parser hermes,
+the server handles tool call parsing natively. LangChain's ChatOpenAI.bind_tools()
+sends tools as structured API parameters — no prompt engineering needed.
 """
 
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Union
+from typing import Any
 
-from langchain.agents import AgentExecutor
-from langchain.agents.structured_chat.output_parser import StructuredChatOutputParser
-from langchain.agents.format_scratchpad import format_log_to_str
-from langchain.tools.render import render_text_description_and_args
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.agents import AgentAction, AgentFinish
-from langchain_core.prompts import ChatPromptTemplate
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from config.settings import get_llm
+from config.settings import get_llm, USE_NATIVE_TOOL_CALLING
 
 
 @dataclass
@@ -72,56 +71,132 @@ def parse_json_output(text: str, agent_name: str) -> dict:
     }
 
 
-# ── Custom Output Parser ──────────────────────────────────────────────────────
-# DeepSeek and similar models often output their final answer as a raw JSON
-# code block without the {"action": "Final Answer", "action_input": "..."}
-# wrapper. The default StructuredChatOutputParser fails on these because it
-# tries to read response["action"] and gets a KeyError.
-#
-# This parser handles that case by detecting JSON without an "action" key
-# and treating it as a final answer.
+# ── Native Tool Calling Prompt ────────────────────────────────────────────────
+# Much simpler than the old structured chat prompt. The tools are passed
+# as structured API parameters by ChatOpenAI.bind_tools(), not embedded
+# in the prompt text. This saves ~500 tokens of context per agent call.
 
-class LenientStructuredChatOutputParser(StructuredChatOutputParser):
-    """Extended parser that handles raw JSON final answers."""
-
-    def parse(self, text: str) -> Union[AgentAction, AgentFinish]:
-        try:
-            return super().parse(text)
-        except Exception as original_error:
-            # Look for a JSON code block that might be a final answer
-            action_match = re.search(
-                r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL
-            )
-            if action_match:
-                try:
-                    response = json.loads(action_match.group(1).strip())
-                    if isinstance(response, dict) and "action" not in response:
-                        # It's a final-answer JSON without the action wrapper
-                        return AgentFinish(
-                            {"output": json.dumps(response)}, text
-                        )
-                except (json.JSONDecodeError, KeyError):
-                    pass
-
-            # Try to find any JSON object in the text
-            brace_start = text.find("{")
-            brace_end = text.rfind("}")
-            if brace_start != -1 and brace_end != -1:
-                candidate = text[brace_start : brace_end + 1]
-                try:
-                    response = json.loads(candidate)
-                    if isinstance(response, dict) and "action" not in response:
-                        return AgentFinish({"output": candidate}, text)
-                except (json.JSONDecodeError, KeyError):
-                    pass
-
-            raise original_error
+TOOL_CALLING_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "{system_prompt}"),
+    ("human", "{input}"),
+    MessagesPlaceholder(variable_name="agent_scratchpad"),
+])
 
 
-# ── Structured Chat Prompt ────────────────────────────────────────────────────
+def run_with_tools(
+    system_prompt: str,
+    human_message: str,
+    tools: list,
+    agent_name: str,
+) -> AgentOutput:
+    """
+    Run a tool-calling agent using vLLM's native tool call support.
 
-STRUCTURED_CHAT_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """Respond to the human as helpfully and accurately as possible.
+    When vLLM is started with --enable-auto-tool-choice, it handles
+    tool call parsing at the server level. LangChain's bind_tools()
+    sends tools as structured parameters in the OpenAI API request.
+
+    This replaces the old structured-chat approach which required
+    complex prompt engineering and custom output parsers.
+
+    Set USE_NATIVE_TOOL_CALLING=false when vLLM is started without
+    --enable-auto-tool-choice / --tool-call-parser (plain OpenAI-compatible server).
+    """
+    if not USE_NATIVE_TOOL_CALLING:
+        return _run_with_tools_legacy(system_prompt, human_message, tools, agent_name)
+
+    llm = get_llm()
+
+    prompt = TOOL_CALLING_PROMPT.partial(system_prompt=system_prompt)
+
+    try:
+        agent = create_tool_calling_agent(llm, tools, prompt)
+    except Exception:
+        # Fallback: if the model doesn't advertise tool support,
+        # use the legacy structured chat approach
+        return _run_with_tools_legacy(system_prompt, human_message, tools, agent_name)
+
+    executor = AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=True,
+        max_iterations=8,
+        handle_parsing_errors=True,
+        return_intermediate_steps=True,
+    )
+
+    try:
+        result = executor.invoke({"input": human_message})
+        output_text = result.get("output", "")
+        tool_calls = len(result.get("intermediate_steps", []))
+        parsed = parse_json_output(output_text, agent_name)
+        return AgentOutput(
+            agent_name=agent_name,
+            success=not parsed.get("_parse_error", False),
+            data=parsed,
+            raw_response=output_text,
+            tool_calls_made=tool_calls,
+        )
+    except Exception as e:
+        return AgentOutput(
+            agent_name=agent_name,
+            success=False,
+            error=str(e),
+        )
+
+
+def _run_with_tools_legacy(
+    system_prompt: str,
+    human_message: str,
+    tools: list,
+    agent_name: str,
+) -> AgentOutput:
+    """
+    Legacy fallback: structured-chat agent for models without native tool support.
+    Uses prompt-based tool calling with a custom output parser.
+    """
+    from langchain.agents.structured_chat.output_parser import StructuredChatOutputParser
+    from langchain.agents.format_scratchpad import format_log_to_str
+    from langchain.tools.render import render_text_description_and_args
+    from langchain_core.runnables import RunnablePassthrough
+    from langchain_core.agents import AgentAction, AgentFinish
+    from typing import Union
+
+    class LenientStructuredChatOutputParser(StructuredChatOutputParser):
+        """Extended parser that handles raw JSON final answers."""
+
+        def parse(self, text: str) -> Union[AgentAction, AgentFinish]:
+            try:
+                return super().parse(text)
+            except Exception as original_error:
+                action_match = re.search(
+                    r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL
+                )
+                if action_match:
+                    try:
+                        response = json.loads(action_match.group(1).strip())
+                        if isinstance(response, dict) and "action" not in response:
+                            return AgentFinish(
+                                {"output": json.dumps(response)}, text
+                            )
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+
+                brace_start = text.find("{")
+                brace_end = text.rfind("}")
+                if brace_start != -1 and brace_end != -1:
+                    candidate = text[brace_start : brace_end + 1]
+                    try:
+                        response = json.loads(candidate)
+                        if isinstance(response, dict) and "action" not in response:
+                            return AgentFinish({"output": candidate}, text)
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+
+                raise original_error
+
+    LEGACY_PROMPT = ChatPromptTemplate.from_messages([
+        ("system", """Respond to the human as helpfully and accurately as possible.
 
 {system_prompt}
 
@@ -141,8 +216,6 @@ Use this JSON format to call a tool:
 The only values that should be in the "action" field are: {tool_names}
 
 IMPORTANT: The "action_input" value must be a simple string, not a JSON object.
-For example: "action_input": "onMessage"  (correct)
-NOT: "action_input": {{{{"symbol": "onMessage"}}}}  (wrong)
 
 Follow this format strictly:
 
@@ -161,17 +234,17 @@ CRITICAL RULES:
 2. After gathering tool results, prefix your answer with "Final Answer:" on its own line.
 3. Do NOT repeat the same tool call you already made.
 4. If a tool says you hit the call limit, IMMEDIATELY give your Final Answer."""),
-    ("human", "{input}\n\n{agent_scratchpad}\n\n(reminder: use the format above)"),
-])
+        ("human", "{input}\n\n{agent_scratchpad}\n\n(reminder: use the format above)"),
+    ])
 
-
-def _build_agent(llm, tools, prompt):
-    """Build a structured chat agent with the lenient output parser."""
+    llm = get_llm()
     tool_strings = render_text_description_and_args(tools)
     tool_names = ", ".join([t.name for t in tools])
 
-    prompt_with_tools = prompt.partial(
-        tools=tool_strings, tool_names=tool_names
+    prompt = LEGACY_PROMPT.partial(
+        system_prompt=system_prompt,
+        tools=tool_strings,
+        tool_names=tool_names,
     )
     llm_with_stop = llm.bind(stop=["Observation"])
 
@@ -181,39 +254,16 @@ def _build_agent(llm, tools, prompt):
                 x["intermediate_steps"]
             ),
         )
-        | prompt_with_tools
+        | prompt
         | llm_with_stop
         | LenientStructuredChatOutputParser()
     )
-    return agent
-
-
-def run_with_tools(
-    system_prompt: str,
-    human_message: str,
-    tools: list,
-    agent_name: str,
-) -> AgentOutput:
-    """
-    Run a structured-chat agent with JSON-formatted tool calls.
-
-    Uses a custom agent chain with LenientStructuredChatOutputParser
-    that handles DeepSeek's tendency to output raw JSON final answers
-    without the action wrapper.
-
-    Used by agents that need to call GitHub tools (Dependency Mapper,
-    Change Simulator, Test Gap Agent).
-    """
-    llm = get_llm()
-
-    prompt = STRUCTURED_CHAT_PROMPT.partial(system_prompt=system_prompt)
-    agent = _build_agent(llm, tools, prompt)
 
     executor = AgentExecutor(
         agent=agent,
         tools=tools,
         verbose=True,
-        max_iterations=8,          # slightly higher to allow recovery
+        max_iterations=8,
         handle_parsing_errors=True,
         return_intermediate_steps=True,
     )

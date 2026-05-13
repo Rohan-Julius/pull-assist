@@ -26,8 +26,9 @@ from cli import __version__
 def _launch_in_new_vscode_terminal(args: list[str]):
     """
     Open a new VS Code integrated terminal and re-run `pa` inside it.
-    Uses osascript to send Cmd+Shift+` (new terminal shortcut) to VS Code,
-    then types the command.
+
+    Uses a wrapper shell script as the terminal's shell process so the
+    command runs directly without being echoed as typed input.
 
     Returns True if launch succeeded, False if not in VS Code.
     """
@@ -48,28 +49,38 @@ def _launch_in_new_vscode_terminal(args: list[str]):
     else:
         cmd_str = pa_bin
 
-    # Escape for osascript
-    escaped_cmd = cmd_str.replace('"', '\\"')
-
     try:
-        # Open new VS Code terminal
-        subprocess.run([
-            "osascript", "-e",
-            'tell application "System Events" to tell process "Code" '
-            'to keystroke "`" using {command down, shift down}'
-        ], capture_output=True, timeout=3)
+        # Create a tiny wrapper script that:
+        #  1. Clears the screen (wipes the echoed keystroke)
+        #  2. Sets PA_LAUNCHED so the CLI doesn't recurse
+        #  3. Sets a clean PS1 prompt
+        #  4. Runs the pa command
+        #  5. Drops into an interactive shell so the terminal stays open
+        project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        wrapper_path = os.path.join(project_dir, ".pa_launcher.sh")
+        with open(wrapper_path, "w") as f:
+            f.write("#!/bin/bash\n")
+            f.write("clear\n")
+            f.write("export PA_LAUNCHED=1\n")
+            f.write(f"export PS1='pull-assist> '\n")
+            f.write(f"export PATH=\"{os.path.dirname(pa_bin)}:$PATH\"\n")
+            f.write(f"{cmd_str}\n")
+            f.write("exec bash --norc --noprofile -i\n")
+        os.chmod(wrapper_path, 0o755)
 
-        import time
-        time.sleep(0.6)
-
-        # Type the command into the new terminal
-        # Set a clean prompt and run the pa command
-        subprocess.run([
-            "osascript", "-e",
-            f'tell application "System Events" to tell process "Code" '
-            f'to keystroke "export PS1=\'pull-assist> \' && PA_LAUNCHED=1 {escaped_cmd}" & return'
-        ], capture_output=True, timeout=3)
-
+        # Use osascript to open a new VS Code terminal via keybinding,
+        # then run the wrapper script (single short command = minimal echo)
+        escaped_wrapper = wrapper_path.replace('"', '\\"')
+        script = f"""
+tell application "System Events"
+    tell process "Code"
+        keystroke "`" using {{command down, shift down}}
+        delay 0.6
+        keystroke "exec {escaped_wrapper}\\n"
+    end tell
+end tell
+"""
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=3)
         return True
     except Exception:
         return False

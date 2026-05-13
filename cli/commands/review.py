@@ -67,6 +67,34 @@ def review(pr_url, diff_file, repo_name, local_path, verbose, full, watch, day1_
     from cli.config_manager import apply_config_to_env
     apply_config_to_env()
 
+    # ── Pre-flight: check LLM connectivity ────────────────────────────────────
+    from config.settings import LLM_BASE_URL, LLM_API_KEY
+    console.print(f"[dim]LLM endpoint: {LLM_BASE_URL}[/dim]")
+    try:
+        import requests as _req
+        # Strip /v1 suffix for health check, or try /v1/models
+        _check_url = LLM_BASE_URL.rstrip("/")
+        if _check_url.endswith("/v1"):
+            _check_url = _check_url + "/models"
+        else:
+            _check_url = _check_url + "/v1/models"
+        _headers = {}
+        if LLM_API_KEY and LLM_API_KEY != "not-needed":
+            _headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+        _resp = _req.get(_check_url, timeout=8, headers=_headers)
+        if _resp.status_code == 200:
+            console.print(f"[green]✓ LLM server reachable[/green]")
+        else:
+            console.print(f"[yellow]⚠ LLM server returned HTTP {_resp.status_code}[/yellow]")
+    except _req.exceptions.ConnectionError:
+        console.print(f"[bold red]✗ Cannot reach LLM server at {LLM_BASE_URL}[/bold red]")
+        console.print(f"  [dim]Is the server running? Check with: pa status[/dim]")
+        sys.exit(1)
+    except _req.exceptions.Timeout:
+        console.print(f"[yellow]⚠ LLM server timed out (>8s) — may be slow[/yellow]")
+    except Exception as _e:
+        console.print(f"[yellow]⚠ LLM connectivity check failed: {_e}[/yellow]")
+
     # ── Build context ─────────────────────────────────────────────────────────
     try:
         if pr_url:

@@ -101,3 +101,6 @@ build/
 
 # Git
 .gitkeep
+
+# CLI launcher helper (auto-generated)
+.pa_launcher.sh

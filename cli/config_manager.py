@@ -97,13 +97,28 @@ def set_value(key: str, value: str):
 def apply_config_to_env():
     """
     Push CLI config values into environment variables
-    so the existing config/settings.py module picks them up
-    without any code changes.
+    so the existing config/settings.py module picks them up.
 
-    Call this before importing any module that reads from env.
+    For the server URL, auto-discovers via the registry (GitHub Gist)
+    so agents always connect to the current GPU server, even when
+    the IP changes. This is the same registry that `pa status` uses.
+
+    CLI config always takes precedence over .env file values,
+    because .env is for local development while CLI config
+    represents the user's explicit settings.
     """
     import os
     config = load_config()
+
+    # ── Resolve server URL via registry (same as pa status) ───────────────
+    try:
+        from cli.registry import fetch_server_url
+        registry = fetch_server_url()
+        registry_url = registry.get("server_url")
+        if registry_url and registry.get("active", True):
+            config["server"] = registry_url
+    except Exception:
+        pass  # fall through to whatever server is in config
 
     env_map = {
         "server":       "LLM_BASE_URL",
@@ -114,5 +129,21 @@ def apply_config_to_env():
 
     for config_key, env_var in env_map.items():
         val = config.get(config_key)
-        if val and not os.getenv(env_var):
+        if val:
             os.environ[env_var] = val
+
+    # Reload settings.py module-level variables that were read at import time
+    try:
+        import config.settings as settings
+        settings.LLM_BASE_URL = os.getenv("LLM_BASE_URL", settings.LLM_BASE_URL)
+        settings.LLM_API_KEY = os.getenv("LLM_API_KEY", settings.LLM_API_KEY)
+        settings.LLM_MODEL = os.getenv("LLM_MODEL", settings.LLM_MODEL)
+        settings.GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", settings.GITHUB_TOKEN)
+        if os.getenv("LLM_MAX_TOKENS"):
+            settings.LLM_MAX_TOKENS = int(os.environ["LLM_MAX_TOKENS"])
+        if os.getenv("USE_NATIVE_TOOL_CALLING") is not None:
+            settings.USE_NATIVE_TOOL_CALLING = os.getenv(
+                "USE_NATIVE_TOOL_CALLING", "true"
+            ).lower() in ("1", "true", "yes")
+    except ImportError:
+        pass  # settings not yet imported — env vars will be read on first import

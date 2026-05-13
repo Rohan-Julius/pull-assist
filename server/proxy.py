@@ -228,7 +228,19 @@ async def chat_completions(request: Request, auth: dict = Depends(verify_api_key
     start = time.time()
 
     try:
-        body = await request.json()
+        raw = await request.body()
+        if not raw or not raw.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Empty request body; expected a JSON chat completions payload.",
+            )
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid JSON body: {e}",
+            ) from e
 
         resp = http_requests.post(
             f"{VLLM_BACKEND_URL}/v1/chat/completions",
@@ -240,7 +252,22 @@ async def chat_completions(request: Request, auth: dict = Depends(verify_api_key
         duration = time.time() - start
         _log_usage(key, user, "/v1/chat/completions", resp.status_code, duration)
 
-        return JSONResponse(content=resp.json(), status_code=resp.status_code)
+        # Safely parse response — vLLM may return non-JSON on errors
+        try:
+            resp_data = resp.json()
+        except (ValueError, Exception):
+            resp_data = {
+                "error": {
+                    "message": f"Backend returned non-JSON response (HTTP {resp.status_code}): {resp.text[:300]}",
+                    "type": "backend_error",
+                    "code": resp.status_code,
+                }
+            }
+            if resp.status_code == 200:
+                # If status was 200 but body isn't JSON, that's a 502
+                return JSONResponse(content=resp_data, status_code=502)
+
+        return JSONResponse(content=resp_data, status_code=resp.status_code)
 
     except http_requests.exceptions.Timeout:
         duration = time.time() - start

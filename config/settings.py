@@ -6,15 +6,19 @@ from langchain_openai import ChatOpenAI
 
 def get_llm():
     """
-    Returns a LangChain LLM pointed at your vLLM endpoint on AMD Cloud.
+    Returns a LangChain LLM pointed at your vLLM endpoint.
     vLLM exposes an OpenAI-compatible API so ChatOpenAI works out of the box.
     """
+    import logging
+    logger = logging.getLogger("pull-assist")
+    logger.info(f"get_llm() → base_url={LLM_BASE_URL}  model={LLM_MODEL}  api_key={LLM_API_KEY[:8]}...")
     return ChatOpenAI(
-        base_url=LLM_BASE_URL,           # your AMD droplet endpoint
-        api_key=LLM_API_KEY,             # "not-needed" for local vLLM
+        base_url=LLM_BASE_URL,
+        api_key=LLM_API_KEY,
         model=LLM_MODEL,
         temperature=LLM_TEMPERATURE,
         max_tokens=LLM_MAX_TOKENS,
+        request_timeout=90,          # prevent infinite hangs
     )
 # ── GitHub ────────────────────────────────────────────────────────────────────
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
@@ -28,8 +32,14 @@ GITHUB_MAX_TOOL_CALLS_PER_AGENT = 3 # hard cap on API calls per agent per run
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8000/v1")
 LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-ai/DeepSeek-Coder-V2-Instruct")
 LLM_API_KEY = os.getenv("LLM_API_KEY", "not-needed")
-LLM_MAX_TOKENS = 1024
+# Completion cap per request. Must leave room in vLLM's --max-model-len for
+# the prompt, tool definitions, and agent scratchpad (often 2.5k–4k+ tokens).
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1024"))
 LLM_TEMPERATURE = 0.1               # low temp for deterministic code analysis
+# When false, use prompt-based tools (no --enable-auto-tool-choice on vLLM).
+USE_NATIVE_TOOL_CALLING = os.getenv(
+    "USE_NATIVE_TOOL_CALLING", "true"
+).lower() in ("1", "true", "yes")
 
 # ── Memory ────────────────────────────────────────────────────────────────────
 MEMORY_DB_PATH = "memory/pr_history.db"
