@@ -2,19 +2,23 @@
 
   <img src="assets/logo.png" alt="Pull Assist logo" width="560">
 
-  <h1>pull-assist</h1>
-  ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)
-  ![LangGraph](https://img.shields.io/badge/LangGraph-Orchestrated-purple?logo=chainlink&logoColor=white)
-  ![vLLM](https://img.shields.io/badge/vLLM-Inference-orange?logo=serverless&logoColor=white)
-  ![AMD ROCm](https://img.shields.io/badge/AMD-ROCm-ED1C24?logo=amd&logoColor=white)
-  ![DeepSeek](https://img.shields.io/badge/Model-DeepSeek--Coder--V2-4A90D9?logo=huggingface&logoColor=white)
-  ![FastAPI](https://img.shields.io/badge/FastAPI-Proxy-009688?logo=fastapi&logoColor=white)
-  ![SQLite](https://img.shields.io/badge/Memory-SQLite-003B57?logo=sqlite&logoColor=white)
-  ![License](https://img.shields.io/badge/License-MIT-green?logo=opensourceinitiative&logoColor=white)
-  ![CLI](https://img.shields.io/badge/CLI-pa_%2F_pullassist-black?logo=windowsterminal&logoColor=white)
-  ![PyPI](https://img.shields.io/badge/PyPI-pull--assist-3775A9?logo=pypi&logoColor=white)
+<br><br>
+
   <p>
-    <strong>Multi-agent PR impact analysis</strong> — a <a href="https://github.com/langchain-ai/langgraph">LangGraph</a>-orchestrated pipeline of specialist agents scores merge risk, maps blast radius, surfaces test gaps, simulates runtime breakage, and advises on rollback and deployment strategy.
+    <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white" alt="Python">
+    <img src="https://img.shields.io/badge/LangGraph-Orchestrated-purple?logo=chainlink&logoColor=white" alt="LangGraph">
+    <img src="https://img.shields.io/badge/vLLM-Inference-orange?logo=serverless&logoColor=white" alt="vLLM">
+    <img src="https://img.shields.io/badge/AMD-ROCm-ED1C24?logo=amd&logoColor=white" alt="AMD ROCm">
+    <img src="https://img.shields.io/badge/Model-DeepSeek--Coder--V2-4A90D9?logo=huggingface&logoColor=white" alt="DeepSeek">
+    <img src="https://img.shields.io/badge/FastAPI-Proxy-009688?logo=fastapi&logoColor=white" alt="FastAPI">
+    <img src="https://img.shields.io/badge/Memory-SQLite-003B57?logo=sqlite&logoColor=white" alt="SQLite">
+    <img src="https://img.shields.io/badge/License-MIT-green?logo=opensourceinitiative&logoColor=white" alt="License">
+    <img src="https://img.shields.io/badge/CLI-pa_%2F_pullassist-black?logo=windowsterminal&logoColor=white" alt="CLI">
+    <img src="https://img.shields.io/badge/PyPI-pull--assist-3775A9?logo=pypi&logoColor=white" alt="PyPI">
+  </p>
+
+  <p>
+    <strong>Multi-agentic PR impact analysis</strong> — a LangGraph-orchestrated pipeline of specialist agents scores merge risk, maps blast radius, surfaces test gaps, simulates runtime breakage, and advises on rollback and deployment strategy.
   </p>
 
   <p>
@@ -95,7 +99,7 @@
 
 ## Agent pipeline
 
-Orchestration lives in `agents/orchestrator.py` as a **LangGraph `StateGraph`**. All agents share a typed state dict (`PRAnalysisState`) — a shared “whiteboard” each node reads and writes.
+Orchestration lives in `agents/orchestrator.py` as a **LangGraph `StateGraph`**. All agents share a typed state dict (`PRAnalysisState`) — a shared "whiteboard" each node reads and writes.
 
 ### Execution flow
 
@@ -128,7 +132,7 @@ END
 | **Risk Evaluator**    | —                               | Weighted 0–10 risk score across blast radius, tests, runtime, complexity                |
 | **Critic**            | —                               | Flags inconsistencies; can trigger re-runs and score corrections                        |
 
-Tool-calling agents use LangChain’s `AgentExecutor`. By default, **legacy prompt-based tools** work with plain vLLM. Set `USE_NATIVE_TOOL_CALLING=true` only when vLLM is started with `--enable-auto-tool-choice` and a matching `--tool-call-parser`.
+Tool-calling agents use LangChain's `AgentExecutor`. By default, **legacy prompt-based tools** work with plain vLLM. Set `USE_NATIVE_TOOL_CALLING=true` only when vLLM is started with `--enable-auto-tool-choice` and a matching `--tool-call-parser`.
 
 After agents finish, outputs are validated against JSON schemas in `config/settings.py` (`AGENT_OUTPUT_SCHEMAS`).
 
@@ -240,7 +244,7 @@ When run inside VS Code (`TERM_PROGRAM=vscode`), `pa` can open a dedicated integ
 
 ## Backend: AMD GPU + vLLM
 
-Inference runs on **AMD GPUs** using **ROCm** and **[vLLM](https://github.com/vllm-project/vllm)**. vLLM exposes an **OpenAI-compatible API** (`/v1/chat/completions`), which LangChain’s `ChatOpenAI` uses via `config/settings.py`.
+Inference runs on **AMD GPUs** using **ROCm** and **[vLLM](https://github.com/vllm-project/vllm)**. vLLM exposes an **OpenAI-compatible API** (`/v1/chat/completions`), which LangChain's `ChatOpenAI` uses via `config/settings.py`.
 
 ### Default model
 
