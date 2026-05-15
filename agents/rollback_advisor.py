@@ -75,19 +75,24 @@ SESSION_PATTERNS   = ["session", "auth", "token", "jwt", "cookie", "credential"]
 QUEUE_PATTERNS     = ["queue", "worker", "celery", "sidekiq", "job", "task", "async"]
 
 
+def _file_basenames_lower(changed_files: list) -> list[str]:
+    return [f.replace("\\", "/").rsplit("/", 1)[-1].lower() for f in changed_files]
+
+
 def _heuristic_difficulty(changed_files: list, total_deletions: int, runtime_risks: dict) -> str | None:
     """
     Fast heuristic classification before LLM call.
     Returns difficulty string if obvious, None if LLM judgment needed.
     """
     files_lower = [f.lower() for f in changed_files]
+    basenames = _file_basenames_lower(changed_files)
 
     # DB migrations → always HIGH
     if any(any(pat in f for pat in MIGRATION_PATTERNS) for f in files_lower):
         return "HIGH"
 
-    # Auth changes → HIGH
-    if any(any(pat in f for pat in SESSION_PATTERNS) for f in files_lower):
+    # Auth/session changes → HIGH (match filename only — avoid path substring false positives)
+    if any(any(pat in bn for pat in SESSION_PATTERNS) for bn in basenames):
         return "HIGH"
 
     # Pure addition (nothing deleted) + no breaking change → LOW
@@ -106,6 +111,60 @@ def _heuristic_difficulty(changed_files: list, total_deletions: int, runtime_ris
     return None  # needs LLM judgment
 
 
+def _sanitize_rollback_output(data: dict, state: dict) -> dict:
+    """
+    Clamp LLM hallucinations: PRs without migrations should not
+    claim data_side_effects (those drive BLOCK_MERGE downstream).
+    """
+    if not isinstance(data, dict):
+        return data
+    changed = state.get("changed_files") or []
+    paths_lower = [f.lower() for f in changed]
+    basenames = _file_basenames_lower(changed)
+    total_del = int(state.get("total_deletions", 0) or 0)
+
+    migrationish = any(any(pat in p for pat in MIGRATION_PATTERNS) for p in paths_lower)
+    sessionish = any(any(pat in bn for pat in SESSION_PATTERNS) for bn in basenames)
+
+    # No migration/schema files → data_side_effects is always false
+    # This is the #1 cause of false "Block Merge" recommendations
+    if not migrationish:
+        if data.get("data_side_effects"):
+            data["_data_side_effects_cleared"] = True
+        data["data_side_effects"] = False
+
+    # Pure addition (0 deletions) + no migrations → low rollback difficulty
+    if total_del == 0 and not migrationish:
+        if data.get("rollback_difficulty") == "HIGH":
+            data["rollback_difficulty"] = "LOW"
+            data["_rollback_difficulty_reconciled"] = True
+
+        risks = data.get("rollback_risks")
+        if isinstance(risks, list) and not sessionish:
+            bad = (
+                "session", "authentication", "token format", "credential",
+                "jwt", "cookie", "invalidated",
+            )
+
+            def _keep(r: object) -> bool:
+                if not isinstance(r, str):
+                    return True
+                rl = r.lower()
+                return not any(b in rl for b in bad)
+
+            filtered = [r for r in risks if _keep(r)]
+            if len(filtered) < len(risks):
+                data["_rollback_risks_filtered"] = True
+            if not filtered:
+                filtered = [
+                    "Revert removes added code paths; no schema or persistence changes "
+                    "detected in changed file list.",
+                ]
+            data["rollback_risks"] = filtered
+
+    return data
+
+
 def run(state: dict) -> AgentOutput:
     changed_files  = state.get("changed_files", [])
     runtime_risks  = state.get("runtime_risks", {})
@@ -122,13 +181,35 @@ def run(state: dict) -> AgentOutput:
             f"Confirm or override this based on your full analysis.\n"
         )
 
+    # Detect feature gates / feature flags in diff as rollback mechanisms
+    raw_diff = state.get("raw_diff", "")
+    pr_desc = state.get("pr_description", "")
+    feature_gate_note = ""
+    import re
+    gate_patterns = [
+        r"feature[_\-]?gate", r"feature[_\-]?flag", r"FeatureGate",
+        r"featuregate\.\w+", r"feature_enabled", r"feature_toggle",
+    ]
+    combined_text = raw_diff[:5000] + " " + pr_desc
+    gate_matches = []
+    for pat in gate_patterns:
+        gate_matches.extend(re.findall(pat, combined_text, re.IGNORECASE))
+    if gate_matches:
+        feature_gate_note = f"""
+FEATURE GATE DETECTED: The diff contains feature gate/flag references ({', '.join(list(set(gate_matches))[:3])}).
+- If a feature gate is introduced, DISABLING the gate may be a faster rollback than git revert.
+- Set feature_flag_possible: true if the change can be disabled via a gate/flag.
+- Include the gate disable step in rollback_steps.
+"""
+
     human_message = f"""Assess rollback difficulty for this deployment.
 
 PR: {state.get('pr_title', '')}
+Description: {(pr_desc or '')[:300]}
 Changed files: {json.dumps(changed_files)}
 Additions: +{state.get('total_additions', 0)}  Deletions: -{total_deletions}
 {heuristic_note}
-
+{feature_gate_note}
 === RUNTIME RISKS ===
 {json.dumps(runtime_risks, indent=2)}
 
@@ -164,5 +245,6 @@ and respond with ONLY the JSON object."""
 
     if output.success:
         output.data = validate_and_repair(output.data, "rollback_advisor")
+        output.data = _sanitize_rollback_output(output.data, state)
 
     return output

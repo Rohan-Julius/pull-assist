@@ -243,6 +243,68 @@ class TestPropagationEngine:
         for chain in chains:
             assert len(chain.steps) <= 4
 
+    def test_dedupe_propagation_chains_same_topology(self):
+        from graph.propagation_engine import (
+            PropagationChain,
+            PropagationStep,
+            _dedupe_propagation_chains,
+        )
+
+        steps = [
+            PropagationStep(
+                file="a.js",
+                domain_label="Test suite",
+                depth=0,
+                confidence="HIGH",
+                risk_note="n",
+                is_critical=False,
+            ),
+            PropagationStep(
+                file="b.js",
+                domain_label="Shared utilities",
+                depth=1,
+                confidence="HIGH",
+                risk_note="n",
+                is_critical=False,
+            ),
+        ]
+        c1 = PropagationChain(
+            symbol="symA", steps=list(steps), narrative="", max_business_impact="", chain_risk_level="LOW"
+        )
+        c2 = PropagationChain(
+            symbol="symB", steps=list(steps), narrative="", max_business_impact="", chain_risk_level="LOW"
+        )
+        out = _dedupe_propagation_chains([c1, c2])
+        assert len(out) == 1
+        assert out[0].symbol == "symA"
+
+    def test_narrative_grounding_rejects_invented_files(self):
+        from graph.propagation_engine import (
+            PropagationChain,
+            PropagationStep,
+            _narrative_only_cites_chain_files,
+        )
+
+        steps = [
+            PropagationStep(
+                file="lib/application.js",
+                domain_label="Request routing",
+                depth=0,
+                confidence="HIGH",
+                risk_note="n",
+                is_critical=False,
+            ),
+        ]
+        chain = PropagationChain(
+            symbol="fn", steps=steps, narrative="", max_business_impact="", chain_risk_level="LOW"
+        )
+        assert _narrative_only_cites_chain_files(
+            "Change in lib/application.js affects routing.", chain
+        )
+        assert not _narrative_only_cites_chain_files(
+            "Also updates diagnostics-channel.js for lifecycle.", chain
+        )
+
     def test_to_dict_serializable(self, simple_graph):
         from graph.propagation_engine import build_propagation_chains
         import json

@@ -60,12 +60,32 @@ The JSON format must be:
 
 def run(state: dict, tools: list) -> AgentOutput:
     symbols_text = format_symbols_for_prompt(
-        state.get("changed_symbols", []),
-        state.get("per_file_context", []),
+      state.get("analysis_symbols", state.get("changed_symbols", [])),
+      state.get("analysis_per_file_context", state.get("per_file_context", [])),
     )
     history_text = budget_history(state.get("repo_history", "No prior history."))
     has_test_changes = state.get("has_test_changes", False)
     test_files_in_diff = state.get("test_files", [])
+
+    # Guard: If no code symbols were detected (e.g. CSS/docs-only PRs),
+    # skip LLM call entirely — there's nothing to test-gap-check.
+    analysis_symbols = state.get("analysis_symbols", state.get("changed_symbols", []))
+    if not analysis_symbols:
+        from agents.base import AgentOutput
+        return AgentOutput(
+            agent_name="test_gap",
+            success=True,
+            data={
+                "covered_functions": [],
+                "uncovered_functions": [],
+                "overall_coverage_assessment": "ADEQUATE",
+                "test_gap_summary": "No code symbols changed — no test gaps to assess (docs/config/style change).",
+                "_no_symbols_guard": True,
+            },
+            raw_response="",
+            tool_calls_made=0,
+            error="",
+        )
 
     test_context = ""
     if has_test_changes:

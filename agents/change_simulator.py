@@ -10,6 +10,7 @@ from agents.base import run_with_tools, AgentOutput
 from agents.schema_validator import validate_and_repair
 from tools.context_budget import budget_per_file_diff, budget_history
 from config.settings import HIGH_SEVERITY_PATH_PATTERNS
+from github.diff_static_risks import augment_runtime_risks_with_diff
 
 SYSTEM_PROMPT = """You are a Change Simulator agent. You reason about ACTUAL runtime behavior.
 
@@ -17,11 +18,12 @@ Your job is to predict what WILL BREAK when this code change is deployed.
 You are NOT a code reviewer. You are simulating production failure modes.
 
 STRICT RULES:
-1. Only report a breaking scenario if you have EVIDENCE from a file you fetched.
-2. Every breaking_scenario MUST include an 'evidence' array with specific proof.
+1. Only report a breaking scenario if you have EVIDENCE from a file you FETCHED via fetch_file (Observation in your trace).
+2. Every breaking_scenario MUST include an 'evidence' array with specific proof from fetched file content.
 3. If you cannot find evidence of a caller breaking, report is_breaking_change: false.
 4. Do not hallucinate callers. If search returns nothing, say so.
 5. Self-report your confidence (1=guessing, 5=high certainty from direct evidence).
+6. You MUST NOT output the final JSON until you have called fetch_file at least once whenever the prompt lists CALLER FILES TO FETCH — otherwise set breaking_scenarios to [] and confidence to 1.
 
 Evidence examples (be this specific):
   "lib/router/index.js imports 'handle' from express at line 12"
@@ -136,7 +138,7 @@ IMPLICATIONS:
     human_message = f"""Simulate the runtime impact of this code change. Only report what you can prove.
 
 PR: {state.get('pr_title', '')}
-Changed symbols: {', '.join(state.get('changed_symbols', []))}
+Changed symbols: {', '.join(state.get('analysis_symbols', state.get('changed_symbols', [])))}
 Diff stats: +{state.get('total_additions', 0)} / -{state.get('total_deletions', 0)}
 {addition_guard}
 DIFF:
@@ -148,13 +150,13 @@ REPO HISTORY:
 {history_text}
 
 Instructions:
-1. Fetch 1-2 caller files and find the specific lines that will break
-2. Include exact evidence quotes in every breaking scenario
+1. If CALLER FILES TO FETCH is non-empty: call fetch_file at least once BEFORE your Final Answer JSON.
+2. Include exact evidence quotes in every breaking scenario (only from fetched content).
 3. If you find no evidence of breakage, set is_breaking_change: false
 4. For pure additions: existing callers cannot break — focus on whether the new code itself is correct
 5. Be honest about your confidence (1-5)
 
-Respond with ONLY the JSON object."""
+Respond with ONLY the JSON object after completing any required tool calls."""
 
     output = run_with_tools(
         system_prompt=SYSTEM_PROMPT,
@@ -166,6 +168,28 @@ Respond with ONLY the JSON object."""
     # Validate and repair output schema
     if output.success:
         output.data = validate_and_repair(output.data, "change_simulator")
+
+        prioritised = _flag_critical_callers(blast_radius or {})
+        if prioritised and output.tool_calls_made == 0:
+            from rich.console import Console
+
+            Console().print(
+                "  [yellow]⚠ Change simulator: 0 fetch_file calls but blast radius lists "
+                "callers — discarding unverified breaking_scenarios[/yellow]"
+            )
+            output.data["breaking_scenarios"] = []
+            output.data["is_breaking_change"] = False
+            try:
+                c = int(output.data.get("confidence", 5))
+            except (TypeError, ValueError):
+                c = 5
+            output.data["confidence"] = min(c, 2)
+            prev = (output.data.get("simulator_summary") or "").strip()
+            suf = " [fetch_file was not invoked — no verified file evidence for scenarios]"
+            output.data["simulator_summary"] = (prev + suf).strip()
+            output.data["_no_fetch_evidence"] = True
+            if is_pure_addition:
+                output.data["_pure_addition_override"] = True
 
         # ── Pure-addition post-processing guard ───────────────────────────
         # If total_deletions == 0, the LLM cannot claim existing code breaks.
@@ -181,11 +205,26 @@ Respond with ONLY the JSON object."""
                 output.data["is_breaking_change"] = False
                 output.data["_pure_addition_override"] = True
 
-                # Downgrade scenario severities — pure additions can't cause
-                # HIGH-severity breakage in existing callers
-                for scenario in output.data.get("breaking_scenarios", []):
-                    if scenario.get("severity") == "HIGH":
-                        scenario["severity"] = "LOW"
-                        scenario["_downgraded"] = "pure addition — existing callers unaffected"
+                # Ground truth: with 0 deletions, existing callers cannot break on
+                # this diff shape. Prior scenarios that alleged caller breakage are
+                # invalid — remove them instead of leaving contradictory narratives.
+                prior = output.data.get("breaking_scenarios") or []
+                n_prior = len(prior)
+                output.data["breaking_scenarios"] = []
+                summary = (output.data.get("simulator_summary") or "").strip()
+                suffix = (
+                    f" Pure addition (+{state.get('total_additions', 0)}/-0): "
+                    "no verified breaking scenarios for existing callers."
+                )
+                if n_prior:
+                    suffix += f" ({n_prior} speculative scenario(s) discarded.)"
+                output.data["simulator_summary"] = (summary + suffix).strip()
+
+        # Diff-grounded runtime risks (e.g. on-finished + unconditional finish publish)
+        output.data = augment_runtime_risks_with_diff(
+            output.data,
+            state.get("raw_diff", ""),
+            int(state.get("total_deletions", 0) or 0),
+        )
 
     return output

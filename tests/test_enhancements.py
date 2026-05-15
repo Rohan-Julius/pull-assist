@@ -224,6 +224,70 @@ class TestWeightedRiskScoring:
                                    "runtime_risk_score", "complexity_score"]}
         assert _server_side_score(dims) == 0.0
 
+    def test_reconcile_top_concerns_removes_runtime_hype_when_no_proof(self):
+        from agents.risk_evaluator import _reconcile_top_concerns_with_scores
+
+        data = {
+            "dimension_scores": {
+                "blast_radius_score": 3.0,
+                "test_coverage_score": 7.0,
+                "runtime_risk_score": 0.0,
+                "complexity_score": 3.0,
+            },
+            "overall_risk_score": 3.5,
+            "top_concerns": [
+                "Potential runtime errors in existing callers",
+                "High test coverage gaps for critical functions",
+            ],
+        }
+        state = {
+            "total_deletions": 0,
+            "total_additions": 100,
+            "runtime_risks": {
+                "is_breaking_change": False,
+                "breaking_scenarios": [],
+                "_pure_addition_override": True,
+            },
+            "test_gaps": {
+                "uncovered_functions": [
+                    {"function": "onMessage", "missing_scenario": "errors", "risk": "MEDIUM"}
+                ]
+            },
+            "blast_radius": {"blast_radius_summary": "Limited dependents."},
+        }
+        _reconcile_top_concerns_with_scores(data, state)
+        joined = " ".join(data["top_concerns"]).lower()
+        assert "potential runtime errors in existing callers" not in joined
+        assert data.get("_top_concerns_reconciled") is True
+        assert any("test gap" in c.lower() or "coverage" in c.lower() for c in data["top_concerns"])
+
+    def test_reconcile_drops_silent_error_concerns_under_strict_filter(self):
+        from agents.risk_evaluator import _reconcile_top_concerns_with_scores
+
+        data = {
+            "dimension_scores": {
+                "blast_radius_score": 3.0,
+                "test_coverage_score": 7.0,
+                "runtime_risk_score": 0.0,
+                "complexity_score": 3.0,
+            },
+            "overall_risk_score": 3.5,
+            "top_concerns": ["Potential for silent errors due to lack of null checks"],
+        }
+        state = {
+            "total_deletions": 0,
+            "total_additions": 50,
+            "runtime_risks": {
+                "is_breaking_change": False,
+                "breaking_scenarios": [],
+                "_pure_addition_override": True,
+            },
+            "test_gaps": {"uncovered_functions": [{"function": "x", "risk": "LOW"}]},
+            "blast_radius": {},
+        }
+        _reconcile_top_concerns_with_scores(data, state)
+        assert not any("silent error" in c.lower() for c in data["top_concerns"])
+
     def test_derive_risk_level_boundaries(self):
         from agents.risk_evaluator import _derive_risk_level
         assert _derive_risk_level(0.0)  == "LOW"
@@ -379,6 +443,22 @@ class TestRollbackAdvisor:
             runtime_risks={"is_breaking_change": False}
         )
         assert result == "LOW"
+
+    def test_sanitize_rollback_clears_spurious_data_risk(self):
+        from agents.rollback_advisor import _sanitize_rollback_output
+        data = {
+            "data_side_effects": True,
+            "rollback_difficulty": "HIGH",
+            "rollback_risks": ["Active sessions may be corrupted due to authentication"],
+        }
+        state = {
+            "total_deletions": 0,
+            "changed_files": ["lib/application.js", "lib/diagnostics.js"],
+        }
+        out = _sanitize_rollback_output(dict(data), state)
+        assert out["data_side_effects"] is False
+        assert out["rollback_difficulty"] == "LOW"
+        assert not any("session" in str(r).lower() for r in out["rollback_risks"])
 
     def test_auth_file_heuristic_high(self):
         from agents.rollback_advisor import _heuristic_difficulty
@@ -654,6 +734,7 @@ class TestFormatterEnhancements:
         from output.formatter import save_markdown
         path = save_markdown(sample_report, str(tmp_path))
         content = (tmp_path / "pr-99-report.md").read_text()
+        assert "How to read this analysis" in content
         assert "Business Impact" in content
         assert "Authentication outage risk" in content
 

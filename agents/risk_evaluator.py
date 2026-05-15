@@ -18,6 +18,7 @@ Risk Evaluator Agent
 """
 
 import json
+import re
 from agents.base import run_without_tools, AgentOutput
 from agents.schema_validator import validate_and_repair
 from config.settings import RISK_WEIGHTS
@@ -75,6 +76,9 @@ Dimension scoring guide:
 CALIBRATION: Most PRs are MEDIUM (3–6). Reserve CRITICAL for changes that
 will cause an incident within minutes of deployment. Don't inflate scores.
 
+CONSISTENCY: top_concerns MUST match dimension_scores. If runtime_risk_score is 0–1,
+do not claim existing callers will crash or that production runtime errors are likely.
+
 Respond with ONLY this JSON (no preamble):
 {{
   "dimension_scores": {{
@@ -118,6 +122,169 @@ def _derive_risk_level(score: float) -> str:
     return "CRITICAL"
 
 
+# ── CVE detection ──────────────────────────────────────────────────────────────
+_CVE_PATTERN = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
+
+# Risk floor when CVEs are present — a CVE fix is never LOW risk
+_CVE_RISK_FLOOR = 7.0
+
+
+def _detect_cves(state: dict) -> list[str]:
+    """Extract CVE identifiers from the PR title, description, and diff."""
+    text = " ".join([
+        state.get("pr_title", ""),
+        state.get("pr_description", ""),
+        state.get("raw_diff", "")[:5000],  # check first 5k chars of diff
+    ])
+    return list(set(_CVE_PATTERN.findall(text)))
+
+
+# If runtime_risk_score is this low, top_concerns must not imply caller/runtime breakage.
+_RUNTIME_CALLER_CONCERN_FRAGMENTS = (
+    "runtime error",
+    "existing caller",
+    "existing callers",
+    "potential runtime",
+    "caller will",
+    "callers will",
+    "caller may",
+    "callers may",
+    "caller ",
+    "will break callers",
+    "breaking existing",
+    "missing_method",
+    "silent error",
+    "silent errors",
+    "lack of null check",
+    "lack of null checks",
+    "null check",
+    "null checks",
+)
+
+
+def _synthetic_concerns_from_state(state: dict, limit: int) -> list[str]:
+    """Deterministic fallbacks when LLM concerns contradict scores."""
+    out: list[str] = []
+    tg = state.get("test_gaps") or {}
+    for u in (tg.get("uncovered_functions") or [])[:3]:
+        if isinstance(u, dict):
+            fn = u.get("function", "?")
+            risk = u.get("risk", "")
+            out.append(f"Test gap: `{fn}` — add coverage ({risk} risk)".strip())
+        elif isinstance(u, str):
+            out.append(f"Test gap: {u}")
+        if len(out) >= limit:
+            return out
+    br = state.get("blast_radius") or {}
+    summ = (br.get("blast_radius_summary") or "").strip()
+    if summ and len(out) < limit:
+        out.append(f"Blast radius: {summ[:180]}")
+    if not out:
+        out.append("Review test coverage and monitoring for new code paths.")
+    return out[:limit]
+
+
+def _reconcile_top_concerns_with_scores(data: dict, state: dict) -> None:
+    """
+    Remove top_concerns that contradict dimension_scores (e.g. runtime caller
+    doom when runtime_risk_score is ~0 after pure-addition pipeline).
+    Refill from test gaps / blast summary when needed.
+    """
+    concerns = data.get("top_concerns")
+    if not isinstance(concerns, list):
+        return
+
+    dims = data.get("dimension_scores") or {}
+    try:
+        rt = float(dims.get("runtime_risk_score", 0))
+    except (TypeError, ValueError):
+        rt = 0.0
+
+    runtime_risks = state.get("runtime_risks") or {}
+    is_breaking = bool(runtime_risks.get("is_breaking_change"))
+    pure_override = bool(runtime_risks.get("_pure_addition_override"))
+    is_pure = state.get("total_deletions", 0) == 0 and state.get("total_additions", 0) > 0
+    no_runtime_proof = not (runtime_risks.get("breaking_scenarios") or [])
+    verified_diff_runtime = any(
+        isinstance(s, dict) and s.get("_verified_from_diff")
+        for s in (runtime_risks.get("breaking_scenarios") or [])
+    )
+
+    strict_filter = (
+        not verified_diff_runtime
+        and (
+            (pure_override and not is_breaking)
+            or (is_pure and not is_breaking and no_runtime_proof)
+            or (rt <= 1.0 and not is_breaking and no_runtime_proof)
+        )
+    )
+
+    filtered: list[str] = []
+    for c in concerns:
+        if not isinstance(c, str):
+            continue
+        low = c.lower()
+        drop = False
+        if strict_filter and any(frag in low for frag in _RUNTIME_CALLER_CONCERN_FRAGMENTS):
+            drop = True
+        if rt <= 0.75 and not is_breaking:
+            # Near-zero runtime: drop generic "runtime" / "caller" breakage language
+            if any(
+                x in low
+                for x in (
+                    "runtime",
+                    "caller",
+                    "break on deploy",
+                    "production crash",
+                )
+            ):
+                drop = True
+        if not drop:
+            filtered.append(c)
+
+    if len(filtered) < len(concerns):
+        data["_top_concerns_reconciled"] = True
+        data["top_concerns"] = filtered
+
+    # Drop stale "test coverage gap" hype when diff proves channel tests exist
+    tg = state.get("test_gaps") or {}
+    if tg.get("_diff_static_test_coverage") and not (tg.get("uncovered_functions") or []):
+        cur = list(data.get("top_concerns") or [])
+        dropped = False
+        out_tc: list[str] = []
+        for c in cur:
+            if not isinstance(c, str):
+                out_tc.append(c)
+                continue
+            cl = c.lower()
+            if any(
+                p in cl
+                for p in (
+                    "test coverage gap",
+                    "test gaps",
+                    "coverage gap",
+                    "significant test coverage",
+                    "uncovered changed",
+                )
+            ):
+                dropped = True
+                continue
+            out_tc.append(c)
+        if dropped:
+            data["_top_concerns_test_gaps_reconciled"] = True
+            data["top_concerns"] = out_tc
+
+    # Ensure at least two concerns for managers when score is non-trivial
+    need = 2 if float(data.get("overall_risk_score", 0)) > 2.5 else 1
+    cur = data.get("top_concerns") or []
+    if isinstance(cur, list) and len(cur) < need:
+        extras = _synthetic_concerns_from_state(state, limit=need - len(cur))
+        for ex in extras:
+            if ex not in cur:
+                cur.append(ex)
+        data["top_concerns"] = cur[:5]
+
+
 def run(state: dict) -> AgentOutput:
     blast_radius  = state.get("blast_radius", {})
     runtime_risks = state.get("runtime_risks", {})
@@ -141,23 +308,60 @@ def run(state: dict) -> AgentOutput:
 
     # Pure-addition context for the LLM
     addition_note = ""
+    diff_static_rt = bool(runtime_risks.get("_diff_static_runtime"))
     if is_pure_addition:
-        addition_note = f"""
+        if diff_static_rt:
+            addition_note = """
+⚠️ PURE ADDITION: This PR has 0 deletions — unchanged symbols and existing call sites
+cannot break due to signature removal.
+
+HOWEVER: runtime_risks may include diff-verified breaking_scenarios (_verified_from_diff)
+for bugs in NEW code (e.g. instrumentation contracts). When those exist with HIGH severity,
+runtime_risk_score MUST reflect real deployment impact (typically 5–8 for SILENT_WRONG
+that skews APM or success metrics), not a near-zero score.
+"""
+        else:
+            addition_note = f"""
 ⚠️ PURE ADDITION: This PR has 0 deletions — no existing code was changed.
   - runtime_risk_score should be LOW (0–3) because existing callers cannot break.
   - blast_radius_score should be LOW unless the new code is in a shared module.
   - Focus risk assessment on the quality of the NEW code, not on breakage.
 """
 
+    # CVE context — security-critical PRs need elevated scoring
+    cve_ids = _detect_cves(state)
+    cve_note = ""
+    if cve_ids:
+        cve_note = f"""\n🔒 SECURITY: This PR references CVE(s): {', '.join(cve_ids)}
+  - This is a security fix. The overall risk score MUST be at least {_CVE_RISK_FLOOR:.0f}/10.
+  - blast_radius_score should reflect the scope of the vulnerability (typically 6+).
+  - runtime_risk_score should reflect the behavioral change needed to mitigate the CVE.
+  - DO NOT underrate security fixes. CVE fixes affect all deployments.
+"""
+
+    # Review comments context — what human reviewers flagged
+    review_note = ""
+    review_comments = state.get("review_comments", [])
+    if review_comments:
+        review_snippets = []
+        for rc in review_comments[:8]:
+            snippet = f"  [{rc.get('user', '?')}] on {rc.get('path', '?')}: {rc.get('body', '')[:150]}"
+            review_snippets.append(snippet)
+        review_note = "\n=== HUMAN REVIEWER COMMENTS (ground truth) ===\n" + "\n".join(review_snippets) + "\n"
+        review_note += "Consider reviewer concerns when scoring dimensions.\n"
+
     human_message = f"""Score the deployment risk of this PR. Follow the weighted formula exactly.
 
 PR: {state.get('pr_title', '')}
+Description: {state.get('pr_description', '')[:500]}
 Diff: {state.get('diff_summary', '')}
 Files: {len(state.get('changed_files', []))} changed (+{state.get('total_additions', 0)}/-{state.get('total_deletions', 0)})
 Has tests in PR: {state.get('has_test_changes', False)}
 {conf_note}
 {business_note}
 {addition_note}
+{cve_note}
+{review_note}
 === BLAST RADIUS ===
 {json.dumps(blast_radius, indent=2)}
 
@@ -184,15 +388,41 @@ then respond with ONLY the JSON object."""
             # When total_deletions == 0, no existing code was changed,
             # so existing callers cannot break.
             if is_pure_addition:
-                runtime_score = float(dims.get("runtime_risk_score", 0))
-                if runtime_score > 3.0:
-                    from rich.console import Console
-                    Console().print(
-                        f"  [yellow]⚠ Pure-addition cap: runtime_risk_score "
-                        f"{runtime_score:.1f} → 3.0 (0 deletions, no breakage possible)[/yellow]"
-                    )
-                    dims["runtime_risk_score"] = 3.0
-                    output.data["_pure_addition_capped"] = True
+                verified_diff_runtime = any(
+                    isinstance(s, dict) and s.get("_verified_from_diff")
+                    for s in (runtime_risks.get("breaking_scenarios") or [])
+                )
+                if not verified_diff_runtime:
+                    runtime_score = float(dims.get("runtime_risk_score", 0))
+                    if runtime_score > 3.0:
+                        from rich.console import Console
+                        Console().print(
+                            f"  [yellow]⚠ Pure-addition cap: runtime_risk_score "
+                            f"{runtime_score:.1f} → 3.0 (0 deletions, no breakage possible)[/yellow]"
+                        )
+                        dims["runtime_risk_score"] = 3.0
+                        output.data["_pure_addition_capped"] = True
+
+                    # Align with simulator: no breaking scenarios + not breaking → low runtime
+                    if not runtime_risks.get("is_breaking_change", False) and not (
+                        runtime_risks.get("breaking_scenarios") or []
+                    ):
+                        rt_cur = float(dims.get("runtime_risk_score", 0))
+                        capped = min(rt_cur, 1.0)
+                        if capped < rt_cur - 0.01:
+                            dims["runtime_risk_score"] = round(capped, 2)
+                            output.data["_runtime_aligned_no_breaking_scenarios"] = True
+
+            # Diff-grounded test gap cleanup: empty uncovered → low test_coverage_score
+            tg = state.get("test_gaps") or {}
+            if tg.get("_diff_static_test_coverage") and not (tg.get("uncovered_functions") or []):
+                try:
+                    tcs = float(dims.get("test_coverage_score", 99))
+                except (TypeError, ValueError):
+                    tcs = 99.0
+                if tcs > 3.0:
+                    dims["test_coverage_score"] = 3.0
+                    output.data["_test_coverage_reconciled_diff"] = True
 
             correct_score = _server_side_score(dims)
             llm_score = float(output.data.get("overall_risk_score", correct_score))
@@ -205,6 +435,50 @@ then respond with ONLY the JSON object."""
                 output.data["overall_risk_score"] = correct_score
                 output.data["risk_level"] = _derive_risk_level(correct_score)
                 output.data["_score_corrected"] = True
+
+            _reconcile_top_concerns_with_scores(output.data, state)
+
+            # ── CVE floor: security fixes never score below _CVE_RISK_FLOOR ──
+            if cve_ids:
+                final_score = float(output.data.get("overall_risk_score", 0))
+                if final_score < _CVE_RISK_FLOOR:
+                    from rich.console import Console
+                    Console().print(
+                        f"  [yellow]⚠ CVE floor: score {final_score:.1f} → {_CVE_RISK_FLOOR:.1f} "
+                        f"(PR references {', '.join(cve_ids)})[/yellow]"
+                    )
+                    output.data["overall_risk_score"] = _CVE_RISK_FLOOR
+                    output.data["risk_level"] = _derive_risk_level(_CVE_RISK_FLOOR)
+                    output.data["_cve_floor_applied"] = True
+                    output.data["_cve_ids"] = cve_ids
+                # Always tag CVE metadata
+                output.data["_cve_ids"] = cve_ids
+
+            # ── Docs/cosmetic ceiling: non-code PRs cannot be MEDIUM+ ────
+            _NON_CODE_INDICATORS = (
+                "docs/", "doc/", ".md", ".css", ".scss", ".less", ".txt",
+                ".html", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".ico",
+                ".yaml", ".yml", ".json", ".toml",
+            )
+            changed_files = state.get("changed_files", [])
+            if changed_files:
+                all_non_code = all(
+                    any(ind in f.lower() for ind in _NON_CODE_INDICATORS)
+                    for f in changed_files
+                )
+                analysis_symbols = state.get("analysis_symbols", state.get("changed_symbols", []))
+                if all_non_code and not analysis_symbols and not cve_ids:
+                    cur = float(output.data.get("overall_risk_score", 0))
+                    _COSMETIC_CEILING = 2.0
+                    if cur > _COSMETIC_CEILING:
+                        from rich.console import Console
+                        Console().print(
+                            f"  [yellow]⚠ Cosmetic ceiling: {cur:.1f} → {_COSMETIC_CEILING:.1f} "
+                            f"(all files are docs/CSS/config, no code symbols)[/yellow]"
+                        )
+                        output.data["overall_risk_score"] = _COSMETIC_CEILING
+                        output.data["risk_level"] = "LOW"
+                        output.data["_cosmetic_ceiling_applied"] = True
 
         output.data = validate_and_repair(output.data, "risk_evaluator")
 

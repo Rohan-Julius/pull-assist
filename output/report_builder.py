@@ -25,6 +25,7 @@ class ReportData:
     languages: list
     changed_files: list
     changed_symbols: list
+    analysis_symbols: list
     has_test_changes: bool
 
     # Agent outputs
@@ -74,6 +75,7 @@ def build_report(final_state: dict) -> ReportData:
         languages=final_state.get("languages", []),
         changed_files=final_state.get("changed_files", []),
         changed_symbols=final_state.get("changed_symbols", []),
+        analysis_symbols=final_state.get("analysis_symbols", final_state.get("changed_symbols", [])),
         has_test_changes=final_state.get("has_test_changes", False),
 
         blast_radius=final_state.get("blast_radius", {}),

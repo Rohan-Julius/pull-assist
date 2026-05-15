@@ -62,6 +62,17 @@ def build_context(pr_url: str, verbose: bool = False) -> dict:
                   f"Symbols: [green]{', '.join(parsed.all_changed_symbols[:6]) or 'none'}[/green]  "
                   f"Tests in PR: [green]{'Yes' if parsed.has_test_changes else 'No'}[/green]")
 
+    # Fetch review comments (for merged/reviewed PRs)
+    review_comments = []
+    review_states = []
+    try:
+        review_comments = client.fetch_pr_reviews(pr_number)
+        review_states = client.fetch_pr_review_states(pr_number)
+        if review_comments:
+            console.print(f"  Reviews: [green]{len(review_comments)} inline comments, {len(review_states)} review states[/green]")
+    except Exception:
+        console.print("  [dim]Could not fetch review comments[/dim]")
+
     console.print("\n[bold cyan]Step 5/5[/bold cyan] Querying memory store...")
     memory = MemoryStore()
     repo_ctx = memory.get_repo_context(repo)
@@ -72,11 +83,20 @@ def build_context(pr_url: str, verbose: bool = False) -> dict:
 
     history_prompt = memory.format_context_for_prompt(repo)
 
+    agent_ctx = parsed.to_agent_context()
+    analysis_per_file = [f for f in agent_ctx["per_file"] if not f.get("is_test")]
+    analysis_symbols: list[str] = []
+    for info in analysis_per_file:
+        analysis_symbols.extend(info.get("symbols", []))
+    if not analysis_symbols:
+        analysis_symbols = parsed.all_changed_symbols
+
     context = {
         "repo": repo, "pr_number": pr_number,
         "pr_url": pr_url, "pr_title": metadata["title"],
         "pr_author": metadata["author"], "base_branch": metadata["base_branch"],
         "pr_html_url": metadata["html_url"],
+        "pr_description": metadata.get("description", ""),
         "diff_summary": parsed.summary,
         "total_additions": parsed.total_additions,
         "total_deletions": parsed.total_deletions,
@@ -85,10 +105,14 @@ def build_context(pr_url: str, verbose: bool = False) -> dict:
         "source_files": parsed.source_files_changed,
         "test_files": parsed.test_files_changed,
         "changed_symbols": parsed.all_changed_symbols,
+        "analysis_symbols": analysis_symbols,
         "has_test_changes": parsed.has_test_changes,
-        "per_file_context": parsed.to_agent_context()["per_file"],
+        "per_file_context": agent_ctx["per_file"],
+        "analysis_per_file_context": analysis_per_file,
         "raw_diff": raw_diff,
         "repo_history": history_prompt,
+        "review_comments": review_comments,
+        "review_states": review_states,
         "_github_client": client,
         "_memory_store": memory,
         "_parsed_diff": parsed,
@@ -173,6 +197,14 @@ def build_context_from_diff(
 
     # Synthesize metadata that would normally come from the GitHub PR API
     pr_title = f"Local diff: {diff_file.name}"
+    agent_ctx = parsed.to_agent_context()
+    analysis_per_file = [f for f in agent_ctx["per_file"] if not f.get("is_test")]
+    analysis_symbols: list[str] = []
+    for info in analysis_per_file:
+        analysis_symbols.extend(info.get("symbols", []))
+    if not analysis_symbols:
+        analysis_symbols = parsed.all_changed_symbols
+
     context = {
         "repo": repo_name,
         "pr_number": 0,  # no PR number for local diffs
@@ -189,8 +221,10 @@ def build_context_from_diff(
         "source_files": parsed.source_files_changed,
         "test_files": parsed.test_files_changed,
         "changed_symbols": parsed.all_changed_symbols,
+        "analysis_symbols": analysis_symbols,
         "has_test_changes": parsed.has_test_changes,
-        "per_file_context": parsed.to_agent_context()["per_file"],
+        "per_file_context": agent_ctx["per_file"],
+        "analysis_per_file_context": analysis_per_file,
         "raw_diff": raw_diff,
         "repo_history": history_prompt,
         "_github_client": client,

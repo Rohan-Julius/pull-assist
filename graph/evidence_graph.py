@@ -217,7 +217,7 @@ def build_evidence_graph(
 
     direct_deps    = blast_radius.get("direct_dependents", [])
     indirect_deps  = blast_radius.get("indirect_dependents", [])
-    changed_symbols = state.get("changed_symbols", [])
+    changed_symbols = state.get("analysis_symbols", state.get("changed_symbols", []))
 
     # Build a lookup: direct file → its dependents (for transitive path reconstruction)
     # indirect reason strings often mention the direct file they flow through

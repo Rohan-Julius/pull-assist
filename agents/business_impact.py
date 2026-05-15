@@ -47,9 +47,9 @@ def classify_from_paths(changed_files: list, blast_radius: dict) -> list[str]:
             continue
 
         for keywords, label in BUSINESS_IMPACT_PATTERNS:
-            if label is None:
-                continue   # skip test file patterns
             if any(kw in path_lower for kw in keywords):
+                if label is None:
+                    break   # null-impact pattern matched, stop checking this file
                 if label not in seen:
                     found_impacts.append(label)
                     seen.add(label)

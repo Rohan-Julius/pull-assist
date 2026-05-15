@@ -2,6 +2,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from config.settings import SUPPORTED_LANGUAGES, SYMBOL_PATTERNS
+from github.diff_static_risks import prioritize_changed_symbols
 
 
 @dataclass
@@ -127,6 +128,7 @@ class DiffParser:
         current_file: ChangedFile | None = None
         current_hunk_lines: list[str] = []
         current_hunk_start_line = 0
+        current_dest_line = 0          # tracks actual line number in destination file
         rename_from = None
 
         for line in raw_diff.splitlines():
@@ -184,6 +186,7 @@ class DiffParser:
                     current_file.diff_hunks.append("\n".join(current_hunk_lines))
                 current_hunk_lines = [line]
                 current_hunk_start_line = int(m.group(1))
+                current_dest_line = current_hunk_start_line
                 continue
 
             # ── Diff content lines ─────────────────────────────────────────
@@ -198,8 +201,9 @@ class DiffParser:
                         name=symbol,
                         kind=self._classify_symbol(line[1:], current_file.language),
                         change_type="added",
-                        line_number=current_hunk_start_line + current_file.additions,
+                        line_number=current_dest_line,
                     ))
+                current_dest_line += 1
 
             elif line.startswith("-") and not line.startswith("---"):
                 current_file.deletions += 1
@@ -213,8 +217,10 @@ class DiffParser:
                         change_type="removed",
                         line_number=current_hunk_start_line,
                     ))
+                # removed lines don't advance dest counter
             else:
                 current_hunk_lines.append(line)
+                current_dest_line += 1  # context lines advance dest counter
 
         # Save the last file
         if current_file is not None:
@@ -227,12 +233,8 @@ class DiffParser:
         result.total_deletions = sum(f.deletions for f in result.changed_files)
         result.languages = list({f.language for f in result.changed_files if f.language != "unknown"})
 
-        all_symbols: list[str] = []
-        for f in result.changed_files:
-            for s in f.changed_symbols:
-                if s.name not in all_symbols:
-                    all_symbols.append(s.name)
-        result.all_changed_symbols = all_symbols
+        # Prefer channel literals + production exports over test-only callback names
+        result.all_changed_symbols = prioritize_changed_symbols(result, raw_diff)
 
         result.test_files_changed = [f.path for f in result.changed_files if f.is_test_file]
         result.source_files_changed = [f.path for f in result.changed_files if not f.is_test_file]
@@ -251,17 +253,40 @@ class DiffParser:
         ext = Path(path).suffix.lower()
         return SUPPORTED_LANGUAGES.get(ext, "unknown")
 
+    # Common local variable names that should never be treated as meaningful symbols
+    _NOISE_SYMBOLS = frozenset({
+        # Single chars & very short
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+        "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+        "_",
+        # Common Go / general idioms
+        "err", "ok", "ctx", "now", "buf", "tmp", "res", "req", "msg", "val",
+        "key", "out", "ret", "log", "cfg", "wg", "mu", "fn", "cb", "args",
+        "opts", "info", "data", "body", "resp", "conn", "addr", "port",
+        "done", "next", "self", "this", "super",
+    })
+
     def _extract_symbol(self, line: str, language: str) -> str | None:
-        """Return the first symbol name found in a line, or None."""
+        """Return the first meaningful symbol name found in a line, or None."""
         patterns = SYMBOL_PATTERNS.get(language, [])
         for pattern in patterns:
             m = re.search(pattern, line.strip())
             if m:
-                return m.group(1)
+                name = m.group(1)
+                # Filter noise: single chars, common idioms
+                if name.lower() in self._NOISE_SYMBOLS:
+                    continue
+                # For Go := assignments, only accept exported symbols (capitalized)
+                if language == "go" and ":=" in line and not name[0].isupper():
+                    continue
+                # Skip names that are too short to be meaningful
+                if len(name) <= 1:
+                    continue
+                return name
         return None
 
     def _classify_symbol(self, line: str, language: str) -> str:
-        """Rough classification of a symbol as function/class/interface."""
+        """Rough classification of a symbol as function/class/interface/const/variable."""
         line = line.strip()
         if re.search(r"\bclass\b", line):
             return "class"
@@ -269,6 +294,12 @@ class DiffParser:
             return "interface"
         if re.search(r"\bstruct\b", line):
             return "struct"
+        if re.search(r"\bconst\b", line):
+            return "constant"
+        if re.search(r"\bvar\b", line):
+            return "variable"
+        if re.search(r":=|\b\w+\s*=\s*", line) and not re.search(r"\bfunc\b", line):
+            return "variable"
         return "function"
 
     def _attach_raw_diff(self, raw_diff: str, result: ParsedDiff):

@@ -13,11 +13,48 @@ from rich.table import Table
 from rich.rule import Rule
 from rich import box
 
+from agents.orchestrator_patch import (
+    compute_adjudication_summary,
+    objection_claims_empty_breaking_but_evidence_exists,
+    objection_confuses_test_coverage_with_runtime,
+)
+
 console = Console()
 
 RISK_COLORS = {"LOW": "green", "MEDIUM": "yellow", "HIGH": "red", "CRITICAL": "bold red", "UNKNOWN": "dim"}
 RISK_EMOJI  = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴", "CRITICAL": "🚨", "UNKNOWN": "❓"}
 ROLLBACK_COLORS = {"LOW": "green", "MEDIUM": "yellow", "HIGH": "red"}
+
+
+def _methodology_markdown_lines() -> list[str]:
+    """Framing for merge-readiness — aligns report with scoring contract."""
+    return [
+        "## How to read this analysis",
+        "",
+        "This pipeline emits an **evidence-weighted merge signal** (multi-agent + graph checks), not a substitute for domain policy or legal sign-off:",
+        "",
+        "- **Runtime risk** reflects **`runtime_risks.breaking_scenarios`** (including **`_verified_from_diff`** entries from the patch). Other scenarios should cite **`fetch_file`** when blast radius lists callers.",
+        "- **Test gaps** drive the **Test coverage** score and the Test Gaps section; they are **not** promoted into runtime risk without a proven caller break.",
+        "- **Blast radius** is from repo-wide symbol search — **disambiguate** near-names (e.g. npm `on-finished` vs PR symbol `onFinish`) using the diff.",
+        "",
+    ]
+
+
+def _blast_radius_homonym_footnote(report) -> str | None:
+    """Warn when common Express/npm naming collisions may inflate dependents."""
+    syms = [str(s).lower() for s in (report.analysis_symbols or [])]
+    if "onfinish" not in syms:
+        return None
+    direct = report.blast_radius.get("direct_dependents") or []
+    indirect = report.blast_radius.get("indirect_dependents") or []
+    blob = " ".join(str(d.get("reason", "")) for d in list(direct) + list(indirect)).lower()
+    if any(x in blob for x in ("on-finished", "onfinished", "onfinish(err", "function onfinish")):
+        return (
+            "_Search-hit note: mentions of **`on-finished`** / **`onfinished`** / **`onfinish(`** may be the "
+            "npm **`on-finished`** package or an internal callback name, not the PR **`onFinish`** symbol — "
+            "confirm against the diff before treating as dependents._"
+        )
+    return None
 
 
 def print_report(report):
@@ -32,7 +69,7 @@ def print_report(report):
         f"[bold]Author:[/bold]  {report.pr_author}\n"
         f"[bold]Diff:[/bold]    +{report.total_additions} / -{report.total_deletions} | "
         f"{len(report.changed_files)} files | {', '.join(report.languages)}\n"
-        f"[bold]Symbols:[/bold] {', '.join(report.changed_symbols[:8]) or 'none'}",
+        f"[bold]Symbols:[/bold] {', '.join(report.analysis_symbols[:8]) or 'none'}",
         title="Pull Request", border_style="blue",
     ))
 
@@ -181,8 +218,20 @@ def print_report(report):
     verdict = report.objections.get("verdict", "AGREE")
     if verdict != "AGREE" or report.rerun_count > 0:
         console.print(f"\n[bold]Critic:[/bold] {verdict} (re-runs: {report.rerun_count})")
-        for obj in report.objections.get("objections", [])[:3]:
+        shown = 0
+        for obj in report.objections.get("objections", []):
+            if not isinstance(obj, dict):
+                continue
+            if objection_confuses_test_coverage_with_runtime(
+                obj, report.runtime_risks, report.risk_assessment
+            ):
+                continue
+            if objection_claims_empty_breaking_but_evidence_exists(obj, report.runtime_risks):
+                continue
+            if shown >= 3:
+                break
             console.print(f"  [yellow]⚡[/yellow] [{obj.get('target_agent','?')}] {obj.get('claim','')}")
+            shown += 1
 
     # ── Actions ───────────────────────────────────────────────────────────────
     if report.recommended_actions:
@@ -217,11 +266,12 @@ def save_markdown(report, output_dir: str = "reports") -> str:
         f"| Author | {report.pr_author} |",
         f"| Diff | +{report.total_additions} / -{report.total_deletions} across {len(report.changed_files)} files |",
         f"| Languages | {', '.join(report.languages)} |",
-        f"| Symbols | {', '.join(report.changed_symbols[:8])} |",
+        f"| Symbols | {', '.join(report.analysis_symbols[:8])} |",
         f"| Test changes in PR | {'Yes' if report.has_test_changes else 'No'} |",
         f"| Analyzed | {report.analyzed_at[:19].replace('T',' ')} UTC |",
         f"",
     ]
+    lines += _methodology_markdown_lines()
 
     # Business impact
     if report.business_impacts:
@@ -276,6 +326,9 @@ def save_markdown(report, output_dir: str = "reports") -> str:
         for d in indirect[:4]:
             lines.append(f"| `{d.get('file','')}` | Indirect | {d.get('confidence','')} | {d.get('reason','')} |")
         lines += ["", f"_{report.blast_radius.get('blast_radius_summary','')}_", ""]
+        hom = _blast_radius_homonym_footnote(report)
+        if hom:
+            lines += [hom, ""]
 
     # Runtime risks with evidence
     if scenarios:
@@ -370,17 +423,35 @@ def save_markdown(report, output_dir: str = "reports") -> str:
 
     # Critic
     verdict = report.objections.get("verdict", "AGREE")
-    from agents.orchestrator_patch import compute_adjudication_summary
-    adj = compute_adjudication_summary(report.conflict_log, report.risk_assessment, report.rerun_count)
+    adj = compute_adjudication_summary(
+        report.conflict_log,
+        report.risk_assessment,
+        report.rerun_count,
+        runtime_risks=report.runtime_risks,
+        risk_assessment=report.risk_assessment,
+        verdict=verdict,
+    )
     lines += [f"## Critic Verdict: {verdict} (re-runs: {report.rerun_count})", "", adj, ""]
     if verdict != "AGREE":
-        for obj in report.objections.get("objections", [])[:3]:
+        shown = 0
+        for obj in report.objections.get("objections", []):
+            if not isinstance(obj, dict):
+                continue
+            if objection_confuses_test_coverage_with_runtime(
+                obj, report.runtime_risks, report.risk_assessment
+            ):
+                continue
+            if objection_claims_empty_breaking_but_evidence_exists(obj, report.runtime_risks):
+                continue
+            if shown >= 3:
+                break
             lines += [
                 f"**[{obj.get('target_agent','?')}]** {obj.get('claim','')}",
                 f"> {obj.get('reason','')}",
                 f"> Suggested: {obj.get('suggested_correction','')}",
                 "",
             ]
+            shown += 1
 
     # Actions
     if report.recommended_actions:
@@ -389,7 +460,7 @@ def save_markdown(report, output_dir: str = "reports") -> str:
             lines.append(f"{i}. {a}")
         lines.append("")
 
-    lines += ["---", "_Generated by PR Impact Analyzer — AMD Hackathon_"]
+    lines += ["---", "_PR Impact Analyzer — evidence-weighted multi-agent merge signal._"]
     fp.write_text("\n".join(lines))
     return str(fp)
 

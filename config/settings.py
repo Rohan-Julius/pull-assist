@@ -20,6 +20,9 @@ def get_llm():
         max_tokens=LLM_MAX_TOKENS,
         request_timeout=90,          # prevent infinite hangs
         streaming=False,
+        # AgentExecutor / LangGraph call .stream(); without this, LangChain uses the
+        # streaming API (expects SSE). Our proxy returns one JSON body → zero chunks.
+        disable_streaming=True,
         model_kwargs={"stream": False},
     )
 # ── GitHub ────────────────────────────────────────────────────────────────────
@@ -67,6 +70,8 @@ SUPPORTED_LANGUAGES = {
     ".jsx": "javascript",
     ".java": "java",
     ".go": "go",
+    ".mod": "go",
+    ".sum": "go",
     ".rb": "ruby",
     ".rs": "rust",
     ".cpp": "cpp",
@@ -83,7 +88,16 @@ SYMBOL_PATTERNS = {
     "javascript": [r"function\s+(\w+)", r"const\s+(\w+)\s*=.*(?:=>|function)", r"class\s+(\w+)"],
     "typescript": [r"function\s+(\w+)", r"const\s+(\w+)\s*=.*(?:=>|function)", r"class\s+(\w+)", r"interface\s+(\w+)"],
     "java":       [r"(?:public|private|protected).*\s+(\w+)\s*\(", r"class\s+(\w+)"],
-    "go":         [r"^func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)", r"type\s+(\w+)\s+struct"],
+    "go":         [
+        r"^func\s+(?:\(\w+\s+\*?\w+\)\s+)?(\w+)",
+        r"type\s+(\w+)\s+struct",
+        r"type\s+(\w+)\s+interface",
+        r"^\s*(\w+)\s*(?:featuregate\.Feature)?\s*=\s*",
+        r"^\s*(\w+)\s*:=\s*",
+        r"^\s*const\s+(\w+)\s*=",
+        r"^\s*var\s+(\w+)\s+",
+        r"\.(\w+)\s*=\s*\d+",
+    ],
     "ruby":       [r"def\s+(\w+)", r"class\s+(\w+)"],
     "rust":       [r"fn\s+(\w+)", r"struct\s+(\w+)", r"impl\s+(\w+)"],
 }
@@ -261,6 +275,11 @@ Respond in this exact JSON format:
 # Maps file path fragments → business domain labels.
 # Used by the business impact analyzer (no LLM needed for classification).
 BUSINESS_IMPACT_PATTERNS = [
+    # Null-impact patterns first — these take priority over keyword matches below
+    (["test", "spec", "fixture"],                                                      None),  # test files — no business impact
+    (["docs/", "doc/", ".md", "readme", "changelog", "license"],                       None),  # documentation — no business impact
+    (["static/", "assets/", ".css", ".scss", ".less", ".svg", ".png", ".ico"],         None),  # static assets — no business impact
+    # Keyword-based business domain classification
     (["auth", "login", "session", "token", "jwt", "oauth", "password", "credential"], "Authentication outage risk"),
     (["payment", "checkout", "billing", "stripe", "invoice", "charge", "order"],      "Payment / checkout disruption"),
     (["user", "profile", "account", "signup", "register"],                             "User account service impact"),
@@ -274,7 +293,6 @@ BUSINESS_IMPACT_PATTERNS = [
     (["config", "env", "settings", "feature_flag", "toggle"],                        "Configuration instability"),
     (["worker", "queue", "job", "celery", "sidekiq", "async", "task"],               "Background job disruption"),
     (["report", "analytics", "metric", "track", "event"],                             "Analytics / reporting impact"),
-    (["test", "spec", "fixture"],                                                      None),  # test files — no business impact
 ]
 
 # ── Enhancement: Agent confidence threshold ───────────────────────────────────

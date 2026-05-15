@@ -33,6 +33,10 @@ Do not guess. If search returns no results, report zero dependents with confiden
 CRITICAL: You MUST actually call the tools and wait for the real Observation before drawing conclusions.
 Do NOT make up or hallucinate tool results. Do NOT skip the tool-calling step.
 
+SYMBOL PRECISION:
+- Treat search hits as valid only when they reference the exact changed symbol name,
+  not homonyms (e.g. onFinished / on-finished vs onFinish).
+
 After you have gathered results from the tools, provide your final answer as a JSON object.
 The JSON format must be:
 {
@@ -53,8 +57,8 @@ def run(state: dict, tools: list) -> AgentOutput:
     The Orchestrator writes results back.
     """
     symbols_text = format_symbols_for_prompt(
-        state.get("changed_symbols", []),
-        state.get("per_file_context", []),
+      state.get("analysis_symbols", state.get("changed_symbols", [])),
+      state.get("analysis_per_file_context", state.get("per_file_context", [])),
     )
     history_text = budget_history(state.get("repo_history", "No prior history."))
     diff_summary = state.get("diff_summary", "")
@@ -74,6 +78,14 @@ REPO HISTORY CONTEXT:
 
 Use the search tool to find which other files in the repo reference these symbols.
 Focus on the most important symbols first (public functions, exported classes).
+SKIP local variable names and single-word common names — only search for function, type, or constant names.
+
+SYMBOL MATCHING (critical):
+- Only list a file as dependent if the hit is for THIS EXACT symbol token (e.g. onFinish),
+  not a different name (e.g. onFinished package, function onfinish, or unrelated strings).
+- If search snippets look like a different identifier, use confidence LOW or omit the file.
+- In Go, only exported symbols (capitalized) create cross-file dependencies. Skip lowercase locals.
+
 After searching, respond with the JSON format specified."""
 
     return run_with_tools(

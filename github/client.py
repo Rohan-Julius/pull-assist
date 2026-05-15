@@ -136,6 +136,67 @@ class GitHubClient:
         self._cache[cache_key] = metadata
         return metadata
 
+    def fetch_pr_reviews(self, pr_number: int) -> list[dict]:
+        """
+        Fetch review comments (inline code comments) from a PR.
+        Returns a list of dicts: {user, body, path, line, state}
+        """
+        cache_key = self._cache_key("reviews", self.repo, pr_number)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        url = f"{GITHUB_API_BASE}/repos/{self.repo}/pulls/{pr_number}/comments"
+        response = self._get(url, params={"per_page": 50})
+
+        if response.status_code == 404:
+            return []
+
+        response.raise_for_status()
+        items = response.json()
+
+        reviews = []
+        for item in items[:50]:
+            reviews.append({
+                "user": item.get("user", {}).get("login", "unknown"),
+                "body": (item.get("body") or "")[:500],
+                "path": item.get("path", ""),
+                "line": item.get("original_line") or item.get("line", 0),
+                "created_at": item.get("created_at", ""),
+            })
+
+        self._cache[cache_key] = reviews
+        return reviews
+
+    def fetch_pr_review_states(self, pr_number: int) -> list[dict]:
+        """
+        Fetch top-level review states (APPROVED, CHANGES_REQUESTED, COMMENTED).
+        Returns a list of dicts: {user, state, body}
+        """
+        cache_key = self._cache_key("review_states", self.repo, pr_number)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        url = f"{GITHUB_API_BASE}/repos/{self.repo}/pulls/{pr_number}/reviews"
+        response = self._get(url, params={"per_page": 30})
+
+        if response.status_code == 404:
+            return []
+
+        response.raise_for_status()
+        items = response.json()
+
+        states = []
+        for item in items[:30]:
+            body = (item.get("body") or "")[:300]
+            states.append({
+                "user": item.get("user", {}).get("login", "unknown"),
+                "state": item.get("state", ""),
+                "body": body,
+            })
+
+        self._cache[cache_key] = states
+        return states
+
     def fetch_file(self, filepath: str, ref: str = None, symbol: str = None) -> str:
         """
         Fetch a file from the repo at a given ref (branch/commit).

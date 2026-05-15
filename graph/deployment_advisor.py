@@ -296,7 +296,7 @@ Respond with ONLY a JSON array of condition strings. Example:
  "Set up Datadog alert on auth.login.error_rate > 2% before deploying"]"""
 
         # Build a compact context for the LLM
-        changed_symbols = state.get("changed_symbols", [])[:5]
+        changed_symbols = state.get("analysis_symbols", state.get("changed_symbols", []))[:5]
         changed_files = [f.split("/")[-1] for f in state.get("changed_files", [])][:5]
         uncovered = [u.get("function", "?") for u in state.get("test_gaps", {}).get("uncovered_functions", [])][:3]
         critical = graph.critical_path_symbols[:3]

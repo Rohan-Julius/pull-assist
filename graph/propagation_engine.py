@@ -355,6 +355,37 @@ def _narrate_chain_template(chain: PropagationChain) -> str:
     return " ".join(parts)
 
 
+def _allowed_file_tokens_from_chain(chain: PropagationChain) -> set[str]:
+    """Basenames and full paths from chain steps (lowercase) for grounding checks."""
+    tok: set[str] = set()
+    for s in chain.steps:
+        f = s.file.replace("\\", "/")
+        tok.add(f.lower())
+        tok.add(f.split("/")[-1].lower())
+    return tok
+
+
+def _narrative_only_cites_chain_files(narrative: str, chain: PropagationChain) -> bool:
+    """Reject LLM prose that invents filenames not present in the chain steps."""
+    import re
+
+    cited = re.findall(
+        r"[a-z0-9][a-z0-9_./-]*\.(?:js|mjs|cjs|ts|tsx|jsx|py|java|go|rb)",
+        narrative.lower(),
+    )
+    if not cited:
+        return True
+    allowed = _allowed_file_tokens_from_chain(chain)
+    for c in cited:
+        base = c.split("/")[-1]
+        if base in allowed or c in allowed:
+            continue
+        if any(a.endswith(base) or base in a for a in allowed):
+            continue
+        return False
+    return True
+
+
 def _llm_narrate_chains(
     chains: list[PropagationChain],
     state: dict,
@@ -380,7 +411,8 @@ For each chain, write ONE concise paragraph (2-3 sentences) explaining:
   2. Which downstream systems are affected and how
   3. What the concrete risk is (crash, data corruption, silent wrong behavior, etc.)
 
-Be specific and technical. Reference actual file names and function names.
+Be specific and technical. Reference actual file names and function names that appear
+in the chain Steps below only — never invent paths or files not listed in the steps.
 Do NOT use generic phrases like "this could cause issues". State the specific failure mode.
 
 Respond with ONLY a JSON array of strings, one narrative per chain. Example:
@@ -420,14 +452,39 @@ Respond with ONLY a JSON array of {len(chains)} narrative string(s)."""
         text = text.replace("```json", "").replace("```", "").strip()
         narratives = _json.loads(text)
         if isinstance(narratives, list) and len(narratives) == len(chains):
-            console.print(f"  [green]✓[/green] LLM narration: {len(narratives)} chain(s) narrated")
-            return narratives
+            grounded: list[str] = []
+            for chain, nar in zip(chains, narratives):
+                if isinstance(nar, str) and _narrative_only_cites_chain_files(nar, chain):
+                    grounded.append(nar)
+                else:
+                    grounded.append(_narrate_chain_template(chain))
+                    console.print(
+                        "  [dim]Narration fell back to template (invented or missing file paths)[/dim]"
+                    )
+            console.print(f"  [green]✓[/green] LLM narration: {len(grounded)} chain(s) narrated")
+            return grounded
         else:
             console.print(f"  [yellow]⚠ LLM returned {len(narratives) if isinstance(narratives, list) else 'non-list'}, expected {len(chains)} — using template fallback[/yellow]")
             return []
     except Exception as e:
         console.print(f"  [yellow]⚠ LLM narration failed ({str(e)[:60]}) — using template fallback[/yellow]")
         return []
+
+
+def _dedupe_propagation_chains(chains: list[PropagationChain]) -> list[PropagationChain]:
+    """
+    Drop chains with identical (file, domain) hop topology. Different changed
+    symbols can yield duplicate paths (e.g. same test → shared util chain).
+    """
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    out: list[PropagationChain] = []
+    for c in chains:
+        sig = tuple((s.file, s.domain_label) for s in c.steps)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(c)
+    return out
 
 
 def build_propagation_chains(
@@ -443,6 +500,7 @@ def build_propagation_chains(
     """
     engine = PropagationEngine()
     chains = engine.build_chains(graph, runtime_risks)
+    chains = _dedupe_propagation_chains(chains)
 
     # Always attach template narratives first (free, instant)
     for chain in chains:

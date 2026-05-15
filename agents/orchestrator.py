@@ -37,6 +37,7 @@ from config.settings import RISK_CONFLICT_THRESHOLD
 import agents.dependency_mapper as dep_mapper
 import agents.change_simulator as sim
 import agents.test_gap as test_gap
+from github.diff_static_risks import augment_test_gaps_with_diff
 import agents.risk_evaluator as risk_eval
 import agents.critic as critic_agent
 import agents.rollback_advisor as rollback_adv
@@ -60,6 +61,7 @@ class PRAnalysisState(TypedDict):
     base_branch: str
     pr_html_url: str
 
+    pr_description: str
     diff_summary: str
     total_additions: int
     total_deletions: int
@@ -68,10 +70,14 @@ class PRAnalysisState(TypedDict):
     source_files: list
     test_files: list
     changed_symbols: list
+    analysis_symbols: list
     has_test_changes: bool
     per_file_context: list
+    analysis_per_file_context: list
     raw_diff: str
     repo_history: str
+    review_comments: list
+    review_states: list
 
     # Agent outputs (written by graph nodes)
     blast_radius: dict
@@ -114,7 +120,51 @@ def node_dependency_mapper(state: PRAnalysisState) -> dict:
     output = dep_mapper.run(state, tools)
     _log_agent_result("dependency_mapper", output)
 
-    return {"blast_radius": output.data if output.success else {"error": output.error, "direct_dependents": [], "indirect_dependents": [], "blast_radius_summary": "Agent failed"}}
+    blast_data = output.data if output.success else {
+        "error": output.error,
+        "direct_dependents": [],
+        "indirect_dependents": [],
+        "blast_radius_summary": "Agent failed",
+    }
+
+    if output.success and blast_data:
+        def _is_test_path(path: str) -> bool:
+            p = path.lower()
+            return any(seg in p for seg in [
+                "test", "tests", "spec", "specs", "__tests__", "_test.", ".test.", ".spec."
+            ])
+
+        direct = [d for d in (blast_data.get("direct_dependents") or []) if not _is_test_path(d.get("file", ""))]
+        indirect = [d for d in (blast_data.get("indirect_dependents") or []) if not _is_test_path(d.get("file", ""))]
+
+        # Inject the PR's own changed source files as baseline dependents
+        # The blast radius must always include the files actually changed in this PR
+        source_files = state.get("source_files", [])
+        per_file_ctx = state.get("analysis_per_file_context", state.get("per_file_context", []))
+        existing_paths = {d.get("file", "") for d in direct}
+
+        for src_file in source_files:
+            if src_file not in existing_paths:
+                # Find symbols for this file from per_file_context
+                file_syms = []
+                for fc in per_file_ctx:
+                    if fc.get("path") == src_file:
+                        file_syms = fc.get("symbols", [])
+                        break
+                sym_str = ", ".join(file_syms[:3]) if file_syms else "modified"
+                direct.append({
+                    "file": src_file,
+                    "reason": f"Directly modified in PR ({sym_str})",
+                    "confidence": "HIGH",
+                    "_baseline": True,
+                })
+                existing_paths.add(src_file)
+
+        blast_data["direct_dependents"] = direct
+        blast_data["indirect_dependents"] = indirect
+        blast_data["blast_radius_summary"] = f"{len(direct)} files directly affected, {len(indirect)} indirectly"
+
+    return {"blast_radius": blast_data}
 
 
 def node_change_simulator(state: PRAnalysisState) -> dict:
@@ -137,6 +187,13 @@ def node_test_gap(state: PRAnalysisState) -> dict:
 
     output = test_gap.run(state, tools)
     _log_agent_result("test_gap", output)
+
+    if output.success and output.data:
+        output.data = augment_test_gaps_with_diff(
+            output.data,
+            state.get("raw_diff", ""),
+            per_file_context=state.get("analysis_per_file_context", state.get("per_file_context", [])),
+        )
 
     return {"test_gaps": output.data if output.success else {"error": output.error, "uncovered_functions": [], "overall_coverage_assessment": "UNKNOWN", "test_gap_summary": "Agent failed"}}
 
@@ -200,10 +257,56 @@ def node_critic(state: PRAnalysisState) -> dict:
     entry = {**(output.data if output.data else {}), "_score_snapshot": current_score}
     conflict_log.append(entry)
 
-    return {
+    updates = {
         "objections": output.data if output.success else {"verdict": "AGREE", "objections": [], "critic_summary": "Critic failed"},
         "conflict_log": conflict_log,
     }
+
+    # Apply critic score recommendations —
+    # If the critic targets risk_evaluator and suggests a specific higher score, apply it.
+    if output.success and output.data:
+        import re
+        risk_assessment = dict(state.get("risk_assessment", {}))
+        current = float(risk_assessment.get("overall_risk_score", 0))
+        applied = False
+
+        for obj in (output.data.get("objections") or []):
+            if not isinstance(obj, dict):
+                continue
+            target = obj.get("target_agent", "")
+            if target != "risk_evaluator":
+                continue
+
+            # Extract numeric score from suggested_correction
+            correction = obj.get("suggested_correction", "")
+            scores = re.findall(r"(\d+(?:\.\d+)?)", correction)
+            for s in scores:
+                suggested = float(s)
+                if 1.0 <= suggested <= 10.0 and suggested > current + 0.5:
+                    console.print(
+                        f"  [yellow]⚠ Applying critic correction: "
+                        f"{current:.1f} → {suggested:.1f} ({correction[:60]})[/yellow]"
+                    )
+                    risk_assessment["overall_risk_score"] = suggested
+                    risk_assessment["_critic_override"] = True
+                    # Re-derive risk level
+                    if suggested <= 3.0:
+                        risk_assessment["risk_level"] = "LOW"
+                    elif suggested <= 5.9:
+                        risk_assessment["risk_level"] = "MEDIUM"
+                    elif suggested <= 7.9:
+                        risk_assessment["risk_level"] = "HIGH"
+                    else:
+                        risk_assessment["risk_level"] = "CRITICAL"
+                    applied = True
+                    break
+            if applied:
+                break
+
+        if applied:
+            updates["risk_assessment"] = risk_assessment
+
+    return updates
 
 
 def node_rerun_with_objections(state: PRAnalysisState) -> dict:
@@ -318,7 +421,7 @@ def node_graph_layer(state: PRAnalysisState) -> dict:
     console.print("\n[bold cyan]▶ Graph Layer:[/bold cyan] Evidence graph + propagation + deployment advice...")
 
     blast_radius    = state.get("blast_radius", {})
-    per_file_ctx    = state.get("per_file_context", [])
+    per_file_ctx    = state.get("analysis_per_file_context", state.get("per_file_context", []))
     runtime_risks   = state.get("runtime_risks", {})
 
     # Priority 1: Evidence Graph
@@ -419,6 +522,9 @@ def run_analysis(context: dict) -> dict:
         "base_branch":  context["base_branch"],
         "pr_html_url":  context["pr_html_url"],
 
+        # PR body / description (contains CVE refs, design rationale)
+        "pr_description": context.get("pr_description", ""),
+
         # Diff data
         "diff_summary":     context["diff_summary"],
         "total_additions":  context["total_additions"],
@@ -428,10 +534,14 @@ def run_analysis(context: dict) -> dict:
         "source_files":     context["source_files"],
         "test_files":       context["test_files"],
         "changed_symbols":  context["changed_symbols"],
+        "analysis_symbols": context.get("analysis_symbols", context["changed_symbols"]),
         "has_test_changes": context["has_test_changes"],
         "per_file_context": context["per_file_context"],
+        "analysis_per_file_context": context.get("analysis_per_file_context", context["per_file_context"]),
         "raw_diff":         context["raw_diff"],
         "repo_history":     context["repo_history"],
+        "review_comments":  context.get("review_comments", []),
+        "review_states":    context.get("review_states", []),
 
         # Agent outputs — empty until agents run
         "blast_radius":    {},
@@ -487,6 +597,9 @@ def run_analysis(context: dict) -> dict:
         final_state.get("conflict_log", []),
         final_state.get("risk_assessment", {}),
         final_state.get("rerun_count", 0),
+        runtime_risks=final_state.get("runtime_risks"),
+        risk_assessment=final_state.get("risk_assessment"),
+        verdict=final_state.get("objections", {}).get("verdict", "AGREE"),
     )
 
     return final_state
